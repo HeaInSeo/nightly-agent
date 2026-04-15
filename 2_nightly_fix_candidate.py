@@ -2,9 +2,7 @@ import os
 import sys
 import json
 import requests
-from agent_core import AgentState, run_cmd
-
-WORKTREE_PATH = os.path.abspath(".nightly_agent/sandbox_worktree")
+from agent_core import AgentState, run_cmd, parse_args
 
 def ask_ollama(prompt, conf):
     url = conf.get("ollama_url", "http://localhost:11434/api/generate")
@@ -16,10 +14,10 @@ def ask_ollama(prompt, conf):
     except Exception as e:
         raise RuntimeError(f"Ollama API Call Failed: {e}")
 
-def cleanup_worktree(branch_name):
-    if os.path.exists(WORKTREE_PATH):
-        run_cmd(f"git worktree remove --force {WORKTREE_PATH}")
-    run_cmd(f"git branch -D {branch_name}") 
+def cleanup_worktree(worktree_path, branch_name, cwd):
+    if os.path.exists(worktree_path):
+        run_cmd(f"git worktree remove --force {worktree_path}", cwd=cwd)
+    run_cmd(f"git branch -D {branch_name}", cwd=cwd) 
 
 def extract_patch(ai_response):
     lines = ai_response.splitlines()
@@ -31,22 +29,20 @@ def extract_patch(ai_response):
             continue
         elif line.startswith("```") and in_patch:
             break
-        
         if in_patch or line.startswith("--- a/") or line.startswith("+++ b/"):
             in_patch = True
             patch_lines.append(line)
-    
-    if not patch_lines:
-        return ai_response 
-    return "\n".join(patch_lines) + "\n"
+    return "\n".join(patch_lines) + "\n" if patch_lines else ai_response 
 
 def main():
-    agent = AgentState()
+    args = parse_args()
+    agent = AgentState(project_name=args.project, run_id=args.run_id)
     if not agent.acquire_lock():
         sys.exit(0)
 
-    # 파생 브랜치명 고유화 방어
     branch_name = f"auto-fix-{agent.run_id}"
+    project_cwd = agent.project_context['path']
+    worktree_path = os.path.abspath(os.path.join(agent.get_run_dir(), "sandbox_worktree"))
 
     try:
         config = agent.config
@@ -55,12 +51,11 @@ def main():
         if state.get("status_p1_review") != "success" or state.get("status_p2_fix") not in ["pending"]:
             return
 
-        state["started_p2_at"] = os.popen('date -Iseconds').read().strip()
         state["status_p2_fix"] = "running"
         agent.save_state(state)
         
-        issues = []
         issues_file = state.get("issues_file")
+        issues = []
         if issues_file and os.path.exists(issues_file):
             with open(issues_file, "r") as f:
                 issues = json.load(f)
@@ -70,13 +65,12 @@ def main():
             agent.save_state(state)
             return
 
-        cleanup_worktree(branch_name)
-        out, err, code = run_cmd(f"git worktree add {WORKTREE_PATH} -b {branch_name} {state.get('target_commit')}")
-        if code != 0:
-            raise Exception(f"Failed to create worktree: {err}")
+        cleanup_worktree(worktree_path, branch_name, project_cwd)
+        out, err, code = run_cmd(f"git worktree add {worktree_path} -b {branch_name} {state.get('target_commit')}", cwd=project_cwd)
 
         max_retries = config.get("max_retries", 3)
-        test_cmd = config.get("test_command", "go test ./...")
+        # Use merged default test command for validation
+        test_cmd = agent.merged_commands.get("test", "echo 'skip test'")
         success = False
         feedback_log = "Initial attempt"
         target_issue = issues[0]
@@ -95,10 +89,10 @@ def main():
             with open(patch_path, "w") as f:
                 f.write(candidate_patch)
                 
-            out, err, code = run_cmd(f"git apply --check {patch_path}", cwd=WORKTREE_PATH)
+            out, err, code = run_cmd(f"git apply --check {patch_path}", cwd=worktree_path)
             if code == 0:
-                run_cmd(f"git apply {patch_path}", cwd=WORKTREE_PATH)
-                test_out, test_err, test_code = run_cmd(test_cmd, cwd=WORKTREE_PATH)
+                run_cmd(f"git apply {patch_path}", cwd=worktree_path)
+                test_out, test_err, test_code = run_cmd(test_cmd, cwd=worktree_path)
                 
                 with open(os.path.join(agent.get_run_dir(), f"candidate_{attempt}_test.log"), "w") as tf:
                     tf.write(test_out + "\n" + test_err)
@@ -108,12 +102,11 @@ def main():
                     final_best_patch = patch_path
                     break
                 else:
-                    feedback_log = f"Patch applied but tests failed. Test Error:\n{test_err}\nPlease rewrite the patch."
-                    run_cmd(f"git restore .", cwd=WORKTREE_PATH) 
+                    feedback_log = f"Patch applied but {test_cmd} failed. Error:\n{test_err}\nPlease fix it."
+                    run_cmd(f"git restore .", cwd=worktree_path) 
             else:
-                feedback_log = f"Patch rejected by git apply --check. Error:\n{err}\nPlease provide a correctly formatted unified patch."
+                feedback_log = f"Patch rejected by check. Error:\n{err}\nProvide correct diff format."
 
-        state["finished_p2_at"] = os.popen('date -Iseconds').read().strip()
         state["status_p2_fix"] = "success" if success else "max_retries_reached"
         if final_best_patch:
             state["best_patch_path"] = final_best_patch
@@ -125,7 +118,7 @@ def main():
         state["error_message"] = str(e)
         agent.save_state(state)
     finally:
-        cleanup_worktree(branch_name)
+        cleanup_worktree(worktree_path, branch_name, project_cwd)
         agent.release_lock()
 
 if __name__ == "__main__":

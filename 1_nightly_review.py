@@ -2,8 +2,8 @@ import os
 import sys
 import json
 import requests
-import re
-from agent_core import AgentState, run_cmd
+from jinja2 import Environment, FileSystemLoader
+from agent_core import AgentState, run_cmd, parse_args
 
 def ask_ollama(prompt, conf):
     url = conf.get("ollama_url", "http://localhost:11434/api/generate")
@@ -15,75 +15,126 @@ def ask_ollama(prompt, conf):
     except Exception as e:
         raise RuntimeError(f"Ollama API Call Failed: {e}")
 
+def get_filtered_diff(agent, state, cwd):
+    base_branch = agent.project_context.get("base_branch", "main")
+    merge_base_out, err, code = run_cmd(f"git merge-base {base_branch} {state['target_commit']}", cwd=cwd)
+    if code != 0:
+        return "", "", f"Merge base failed. Make sure {base_branch} exists locally."
+    
+    merge_base = merge_base_out.strip()
+    
+    # Path filtering based on includes/excludes
+    review_conf = agent.project_context.get("review", {})
+    includes = review_conf.get("include", [])
+    excludes = review_conf.get("exclude", [])
+    
+    pathspec = []
+    if includes:
+        pathspec.extend(includes)
+    if excludes:
+        for ex in excludes:
+            pathspec.append(f"':!{ex}'")
+            
+    paths_arg = " ".join(pathspec)
+    diff_strategy = f"git diff {base_branch}...{state['target_commit']}"
+    if paths_arg:
+        diff_strategy += f" -- {paths_arg}"
+        
+    diff_text, err, code = run_cmd(diff_strategy, cwd=cwd)
+    return diff_text, merge_base, ""
+
 def main():
-    agent = AgentState()
+    args = parse_args()
+    if not args.project:
+        print("Error: --project is required.")
+        return
+
+    agent = AgentState(project_name=args.project, run_id=args.run_id)
     if not agent.acquire_lock():
         sys.exit(0)
 
     try:
         config = agent.config
         state = agent.load_state()
-        
         if state.get("status_p1_review") in ["success", "skipped", "failed"]:
             return
 
-        state["started_p1_at"] = os.popen('date -Iseconds').read().strip()
         state["status_p1_review"] = "running"
         agent.save_state(state)
 
-        base_branch = config.get("base_branch", "master")
-        target_commit = state.get("target_commit")
+        cwd = agent.project_context['path']
         
-        merge_base_out, err, code = run_cmd(f"git merge-base {base_branch} {target_commit}")
-        if code != 0:
-            state["status_p1_review"] = "failed"
-            state["error_message"] = f"Diff merge base failed. Make sure {base_branch} exists locally."
+        # 1. Preflight Commands (Build, Test, Lint)
+        test_results = {}
+        for cmd_type in ["build", "test", "lint", "validate"]:
+            cmd = agent.merged_commands.get(cmd_type)
+            if cmd:
+                out, err, code = run_cmd(cmd, cwd=cwd)
+                res_str = "SUCCESS" if code == 0 else "FAILED"
+                test_results[cmd_type] = f"[{res_str}]\n{err[-500:] if code != 0 else ''}"
+
+        # 2. Diff extraction
+        diff_text, merge_base, err_msg = get_filtered_diff(agent, state, cwd)
+        if err_msg or not diff_text.strip():
+            state["status_p1_review"] = "skipped"
+            state["error_message"] = err_msg or "No diff found."
             agent.save_state(state)
             return
-            
-        merge_base = merge_base_out.strip()
-        state["base_branch"] = base_branch
+
+        diff_lines = len(diff_text.splitlines())
+        if diff_lines > config.get("max_diff_lines", 2000):
+            state["status_p1_review"] = "skipped"
+            state["error_message"] = "Diff too large limit exceeded."
+            agent.save_state(state)
+            return
+
         state["merge_base"] = merge_base
-        state["diff_strategy"] = f"git diff {base_branch}...{target_commit}"
+        state["base_branch"] = agent.project_context.get('base_branch')
         
-        diff_text, err, code = run_cmd(state["diff_strategy"])
-
-        if code != 0 or not diff_text.strip():
-            state["status_p1_review"] = "skipped"
-            state["error_message"] = "No structural diff found against base. Skipped review."
-            agent.save_state(state)
-            return
-
-        if len(diff_text.splitlines()) > config.get("max_diff_lines", 2000):
-            state["status_p1_review"] = "skipped"
-            state["error_message"] = "Diff too large, degrading to review-only mode (skip fixes)."
-            agent.save_state(state)
-            return
-
-        report_prompt = f"You are a Senior Engineer. Review this code diff and output a markdown report detailing logical bugs, security flaws, and optimization points.\n\n[Diff]\n{diff_text}"
-        review_content = ask_ollama(report_prompt, config)
-
-        json_prompt = f"Based on the following diff, output ONLY a valid JSON array of issues (and absolutely no other text, no markdown backticks). [{{\"id\":\"issue-1\", \"title\":\"short title\", \"severity\":\"high/medium/low\", \"target_files\":[\"file.ext\"], \"suggested_action\":\"fix description\"}}]. If no issues, output []. \n[Diff]\n{diff_text}"
-        json_res = ask_ollama(json_prompt, config)
+        env = Environment(loader=FileSystemLoader('.'))
         
+        # 3. Dynamic Prompting via Jinja
+        p_type = agent.project_context.get('type')
+        prompt_template = env.get_template(f"prompts/review/{p_type}.md.j2")
+        rendered_prompt = prompt_template.render(heuristics=agent.heuristics, diff_text=diff_text)
+        
+        # Force JSON constraint
+        json_directive = "\n\nOutput ONLY valid JSON string mapped to this exact struct: {\"one_line_summary\":\"\",\"top_issues\":[{\"id\":\"1\",\"title\":\"\",\"severity\":\"high\",\"target_files\":[\"\"],\"suggested_action\":\"\"}],\"categorize\":{\"features\":0,\"refactor\":0,\"config\":0,\"tests\":0,\"infra\":0},\"llm_review\":{\"bugs\":\"\",\"regressions\":\"\",\"missing_tests\":\"\",\"architecture\":\"\",\"performance\":\"\"}}"
+        
+        ai_res = ask_ollama(rendered_prompt + json_directive, config)
         try:
-            json_res = json_res.replace("```json", "").replace("```", "").strip()
-            structured_issues = json.loads(json_res)
-        except json.JSONDecodeError:
-            structured_issues = []
+            ai_data = json.loads(ai_res.replace("```json", "").replace("```", "").strip())
+        except Exception:
+            ai_data = {"top_issues": []}
+
+        report_template = env.get_template("templates/report.md.j2")
+        final_report = report_template.render(
+            project_name=agent.project_name,
+            current_date=state["created_at"],
+            target_branch=state["target_branch"],
+            target_commit=state["target_commit"],
+            merge_base=merge_base,
+            changed_files_count=len([l for l in diff_text.splitlines() if l.startswith('+++')]),
+            diff_lines_count=diff_lines,
+            status_review="Done",
+            status_fix="Pending",
+            one_line_summary=ai_data.get("one_line_summary", ""),
+            top_issues=ai_data.get("top_issues", []),
+            categorize=ai_data.get("categorize", {}),
+            test_results=test_results,
+            llm_review=ai_data.get("llm_review", {})
+        )
 
         report_path = os.path.join(agent.get_run_dir(), "review_report.md")
         with open(report_path, "w") as f:
-            f.write(review_content)
+            f.write(final_report)
             
         issues_path = os.path.join(agent.get_run_dir(), "issues.json")
         with open(issues_path, "w") as f:
-            json.dump(structured_issues, f, indent=4)
+            json.dump(ai_data.get("top_issues", []), f, indent=4)
 
         state["review_report_path"] = report_path
         state["issues_file"] = issues_path
-        state["issues_count"] = len(structured_issues)
-        state["finished_p1_at"] = os.popen('date -Iseconds').read().strip()
         state["status_p1_review"] = "success"
         agent.save_state(state)
 

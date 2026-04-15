@@ -1,54 +1,52 @@
 import os
 import sys
-from agent_core import AgentState
+import json
+from jinja2 import Environment, FileSystemLoader
+from agent_core import AgentState, parse_args
 
 def main():
-    agent = AgentState("latest")
-    if not agent.acquire_lock():
+    args = parse_args()
+    # If project is passed, summarize single. If not, summarize all in run_id
+    agent = AgentState(run_id=args.run_id if args else "latest")
+    
+    env = Environment(loader=FileSystemLoader('.'))
+    
+    candidates = []
+    
+    # Iterate all projects in the run dir
+    run_dir = agent.run_dir
+    if not os.path.exists(run_dir):
+        print("Run directory not found.")
         sys.exit(0)
-
-    try:
-        state = agent.load_state()
         
-        if state.get("status_p3_summary") == "success":
-            return
-            
-        summary_lines = []
-        summary_lines.append(f"# Morning Agent Summary")
-        summary_lines.append(f"**Run ID**: {agent.run_id}")
-        summary_lines.append(f"**Base Branch**: {state.get('base_branch', 'Unknown')} (Merge Base: {state.get('merge_base', 'Unknown')[:7]})")
-        summary_lines.append(f"**Target Commit**: {state.get('target_commit', 'Unknown')[:7]}")
-        summary_lines.append(f"**Branch**: {state.get('target_branch', 'Unknown')}\n")
-        
-        summary_lines.append(f"## Phase 1: Review Status [{state.get('status_p1_review', 'unknown')}]")
-        if state.get("status_p1_review") == "success":
-            summary_lines.append(f"- Issues Found: {state.get('issues_count', 0)}")
-            summary_lines.append(f"- Report Path: {state.get('review_report_path', 'N/A')}\n")
-        else:
-            summary_lines.append(f"- Details: {state.get('error_message', 'No details available.')}\n")
-            
-        summary_lines.append(f"## Phase 2: Fix Candidate Status [{state.get('status_p2_fix', 'unknown')}]")
-        if state.get("status_p2_fix") == "success":
-            summary_lines.append(f"- A valid patch has been generated on attempt {state.get('attempt_count', 1)}.")
-            summary_lines.append(f"- Check best patch safely at: {state.get('best_patch_path', 'N/A')}\n")
-        elif state.get("status_p2_fix") == "max_retries_reached":
-            summary_lines.append(f"- Agent could not fix the issues within the retry limit ({state.get('attempt_count', 3)}).\n")
-        else:
-            summary_lines.append(f"- Details: {state.get('error_message', 'No patch generated or fix skipped.')}\n")
-            
-        summary_path = os.path.join(agent.get_run_dir(), "summary.md")
-        with open(summary_path, "w") as f:
-            f.write("\n".join(summary_lines))
-            
-        state["status_p3_summary"] = "success"
-        agent.save_state(state)
-        
-    except Exception as e:
-        state["status_p3_summary"] = "failed"
-        state["error_message"] = str(e)
-        agent.save_state(state)
-    finally:
-        agent.release_lock()
+    for item in os.listdir(run_dir):
+        p_dir = os.path.join(run_dir, item)
+        if os.path.isdir(p_dir):
+            s_file = os.path.join(p_dir, "state.json")
+            if os.path.exists(s_file):
+                with open(s_file, "r") as f:
+                    st = json.load(f)
+                    
+                issues_file = st.get("issues_file")
+                first_issue_title = "Unknown"
+                if issues_file and os.path.exists(issues_file):
+                    with open(issues_file, "r") as isf:
+                        iv = json.load(isf)
+                        if iv and isinstance(iv, list):
+                            first_issue_title = iv[0].get("title", first_issue_title)
+                            
+                candidates.append({
+                    "target_issue": f"[{item}] {first_issue_title}",
+                    "status": st.get("status_p2_fix"),
+                    "reason": st.get("error_message", "Patched successfully" if st.get("status_p2_fix") == "success" else "Failed"),
+                    "path": st.get("best_patch_path", "N/A")
+                })
+                
+    summary_template = env.get_template("templates/summary.md.j2")
+    final_summary = summary_template.render(fix_candidates=candidates)
+    
+    with open(os.path.join(run_dir, "summary.md"), "w") as f:
+        f.write(final_summary)
 
 if __name__ == "__main__":
     main()
