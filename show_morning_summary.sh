@@ -1,32 +1,25 @@
 #!/bin/bash
-# show_morning_summary.sh - 아침 수동 조회용 CLI
+# show_morning_summary.sh - 아침 수동 조회용 스크립트
 
-RUN_ID=$(date +%Y-%m-%d)
-RUN_DIR=".nightly_agent/runs/$RUN_ID"
-STATE_FILE="$RUN_DIR/state.json"
-REVIEW_FILE="$RUN_DIR/review_report.md"
+# 가장 최근 Run 탐색
+RUN_DIR=$(ls -td .nightly_agent/runs/*/ 2>/dev/null | head -1)
 
 echo "====================================="
 echo " 🌙 Nightly Agent Summary Report"
 echo "====================================="
 
-if [ ! -d "$RUN_DIR" ]; then
-    echo "어젯밤 실행된(Run) 기록이 없습니다 ($RUN_ID)."
+if [ -z "$RUN_DIR" ]; then
+    echo "실행된(Run) 기록이 전혀 없습니다."
     exit 0
 fi
 
-echo "[상태 요약]"
-cat $STATE_FILE | grep "status"
+echo "[가장 최근 Run 폴더: $RUN_DIR]"
 
-echo ""
-echo "[최상위 이슈 목록]"
-if [ -f "$REVIEW_FILE" ]; then
-    cat $REVIEW_FILE
+SUMMARY_FILE="${RUN_DIR}summary.md"
+if [ -f "$SUMMARY_FILE" ]; then
+    cat "$SUMMARY_FILE"
 else
-    echo "리뷰 리포트가 아직 생성되지 않았습니다."
+    echo "summary.md 가 아직 생성되지 않았습니다. (3_morning_summary.py 를 실행하세요)"
 fi
 
-echo ""
-echo "[패치 후보 목록]"
-ls -l $RUN_DIR/*.patch 2>/dev/null || echo "생성된 패치 후보가 없습니다."
 echo "====================================="

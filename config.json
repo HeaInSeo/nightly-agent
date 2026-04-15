@@ -1,0 +1,8 @@
+{
+  "ollama_url": "http://localhost:11434/api/generate",
+  "model_name": "gemma4:26b",
+  "max_diff_lines": 2000,
+  "max_retries": 3,
+  "test_command": "go test ./...",
+  "base_branch": "master"
+}
