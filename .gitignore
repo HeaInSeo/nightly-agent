@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
+*.log
+.venv/
+.env
 .nightly_agent/runs/
 .nightly_agent/sandbox_worktree/

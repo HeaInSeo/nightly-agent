@@ -16,7 +16,8 @@ def main():
         summary_lines = []
         summary_lines.append(f"# Morning Agent Summary")
         summary_lines.append(f"**Run ID**: {agent.run_id}")
-        summary_lines.append(f"**Target Commit**: {state.get('target_commit', 'Unknown')}")
+        summary_lines.append(f"**Base Branch**: {state.get('base_branch', 'Unknown')} (Merge Base: {state.get('merge_base', 'Unknown')[:7]})")
+        summary_lines.append(f"**Target Commit**: {state.get('target_commit', 'Unknown')[:7]}")
         summary_lines.append(f"**Branch**: {state.get('target_branch', 'Unknown')}\n")
         
         summary_lines.append(f"## Phase 1: Review Status [{state.get('status_p1_review', 'unknown')}]")
@@ -28,12 +29,12 @@ def main():
             
         summary_lines.append(f"## Phase 2: Fix Candidate Status [{state.get('status_p2_fix', 'unknown')}]")
         if state.get("status_p2_fix") == "success":
-            summary_lines.append(f"- A valid patch has been generated.")
-            summary_lines.append(f"- Check patch at: {agent.get_run_dir()}/candidate.patch\n")
+            summary_lines.append(f"- A valid patch has been generated on attempt {state.get('attempt_count', 1)}.")
+            summary_lines.append(f"- Check best patch safely at: {state.get('best_patch_path', 'N/A')}\n")
         elif state.get("status_p2_fix") == "max_retries_reached":
-            summary_lines.append(f"- Agent could not fix the issues within the retry limit ({state.get('attempt_count')}).\n")
+            summary_lines.append(f"- Agent could not fix the issues within the retry limit ({state.get('attempt_count', 3)}).\n")
         else:
-            summary_lines.append(f"- Details: {state.get('error_message', 'No patch generated.')}\n")
+            summary_lines.append(f"- Details: {state.get('error_message', 'No patch generated or fix skipped.')}\n")
             
         summary_path = os.path.join(agent.get_run_dir(), "summary.md")
         with open(summary_path, "w") as f:

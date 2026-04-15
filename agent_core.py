@@ -14,7 +14,6 @@ def run_cmd(cmd, cwd="."):
 class AgentState:
     def __init__(self, run_id=None):
         self.config = self.load_config()
-        # Find latest run if run_id is "latest"
         if run_id == "latest":
             runs_dir = os.path.join(AGENT_DIR, "runs")
             if os.path.exists(runs_dir):
@@ -22,17 +21,20 @@ class AgentState:
                 if runs:
                     self.run_id = runs[0]
                 else:
-                    self.run_id = datetime.date.today().isoformat()
+                    self.run_id = self.generate_run_id()
             else:
-                self.run_id = datetime.date.today().isoformat()
+                self.run_id = self.generate_run_id()
         else:
-            self.run_id = run_id or datetime.date.today().isoformat()
+            self.run_id = run_id or self.generate_run_id()
 
         self.run_dir = os.path.abspath(os.path.join(AGENT_DIR, "runs", self.run_id))
         self.state_file = os.path.join(self.run_dir, "state.json")
         self.lock_file = os.path.join(self.run_dir, "run.lock")
         self.lock_fd = None
         os.makedirs(self.run_dir, exist_ok=True)
+
+    def generate_run_id(self):
+        return datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
