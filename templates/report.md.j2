@@ -1,0 +1,50 @@
+# Nightly Code Review: {{ project_name }}
+
+**Date**: {{ current_date }}
+**Branch**: {{ target_branch }}
+**Target Commit**: {{ target_commit }}
+**Merge Base**: {{ merge_base }}
+
+## 1. Summary
+- **Files Changed**: {{ changed_files_count }}
+- **Diff Lines**: {{ diff_lines_count }}
+- **Review Phase**: {{ status_review }}
+- **Fix Candidate Phase**: {{ status_fix }}
+
+**One-line Assessment**: {{ one_line_summary }}
+
+## 2. Top 3 Issues to Review Today
+{% for issue in top_issues %}
+1. **{{ issue.title }}** ({{ issue.severity }}) in `{{ issue.target_files | join(', ') }}`
+   - Action: {{ issue.suggested_action }}
+{% else %}
+- Excellent, no critical issues found.
+{% endfor %}
+
+## 3. Change Categorization
+- **Features**: {{ categorize.features }} files
+- **Refactoring**: {{ categorize.refactor }} files
+- **Config/Setup**: {{ categorize.config }} files
+- **Tests**: {{ categorize.tests }} files
+- **Infra/Scripts**: {{ categorize.infra }} files
+
+## 4. Test & Lint Results
+- **Build**: {{ test_results.build }}
+- **Test**: {{ test_results.test }}
+- **Lint/Validate**: {{ test_results.lint }}
+
+## 5. Detailed LLM Review
+### Suspected Bugs
+{{ llm_review.bugs }}
+
+### Regression Risks
+{{ llm_review.regressions }}
+
+### Missing Tests
+{{ llm_review.missing_tests }}
+
+### Architectural Boundary Violations
+{{ llm_review.architecture }}
+
+### Performance / Concurrency Risks
+{{ llm_review.performance }}

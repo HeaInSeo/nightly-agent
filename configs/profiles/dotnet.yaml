@@ -1,0 +1,11 @@
+type: dotnet
+default_commands:
+  build: "dotnet build"
+  test: "dotnet test"
+
+heuristics:
+  - "Ensure proper nullable reference handling to prevent NullReferenceExceptions."
+  - "Check for missing async/await modifiers or deadlocks (.Result / .Wait())."
+  - "Verify proper disposal (IDisposable / using blocks) for memory lifecycle management."
+  - "Ensure UI thread safety and proper MVVM data binding handling."
+  - "Watch for unintended csproj or NuGet package dependency side-effects."

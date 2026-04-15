@@ -1,0 +1,12 @@
+type: infra
+default_commands:
+  build: "terraform validate"
+  test: "terraform plan"
+  lint: "terraform fmt -check"
+
+heuristics:
+  - "Assess risk of state drift and destructive changes (accidental forced replacements)."
+  - "Check for correct variable types and missing defaults."
+  - "Monitor explicit provider version bindings."
+  - "Check for hardcoded secrets or misconfigured IAM privileges."
+  - "Validate resource lifecycles."

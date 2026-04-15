@@ -1,0 +1,50 @@
+projects:
+  - name: tori
+    path: /opt/go/src/github.com/HeaInSeo/tori
+    type: go
+    base_branch: main
+    diff_mode: merge-base
+    review:
+      include:
+        - "*.go"
+        - "*.mod"
+        - "*.sum"
+      exclude:
+        - vendor/**
+        - testdata/**
+    commands:
+      test: "go test ./..."
+      lint: "make lint"
+      build: "go build ./..."
+
+  - name: DagEdit
+    path: /opt/dotnet/src/github.com/HeaInSeo/DagEdit
+    type: dotnet
+    base_branch: main
+    review:
+      include:
+        - "*.cs"
+        - "*.csproj"
+        - "*.sln"
+        - "*.axaml"
+      exclude:
+        - bin/**
+        - obj/**
+    commands:
+      test: "dotnet test"
+      build: "dotnet build"
+
+  - name: multipass-k8s-lab
+    path: /opt/go/src/github.com/HeaInSeo/multipass-k8s-lab
+    type: infra
+    base_branch: main
+    review:
+      include:
+        - "*.hcl"
+        - "*.tf"
+        - "*.yaml"
+        - "*.yml"
+        - "*.sh"
+    commands:
+      validate: "terraform validate"
+      lint: "shellcheck scripts/*.sh"

@@ -1,0 +1,22 @@
+# Morning Agent Summary
+
+## Candidates Generated
+{% if fix_candidates %}
+{% for patch in fix_candidates %}
+- **Target Issue**: {{ patch.target_issue }}
+- **Status**: {{ patch.status }} ({{ patch.reason }})
+- **Location**: `{{ patch.path }}`
+{% endfor %}
+{% else %}
+- No patches requested or generated.
+{% endif %}
+
+## Action Plan
+**Do This Morning**:
+- Review top issues in `review_report.md`
+{% if fix_candidates %}
+- Inspect `candidate.patch` via `git apply --check`
+{% endif %}
+
+**Can Be Deferred**:
+- Minor refactoring and lint errors.

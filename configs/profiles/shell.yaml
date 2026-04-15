@@ -1,0 +1,11 @@
+type: shell
+default_commands:
+  lint: "shellcheck *.sh"
+  test: "bash -n *.sh"
+
+heuristics:
+  - "Ensure scripts use 'set -euo pipefail'."
+  - "Check for proper unquoted variables affecting globbing and paths."
+  - "Review dangerous operations like recursive rm, mv, cp."
+  - "Validate the presence of trap statements for cleanup on failure."
+  - "Evaluate command substitution security."

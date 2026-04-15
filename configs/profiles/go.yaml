@@ -1,0 +1,12 @@
+type: go
+default_commands:
+  build: "go build ./..."
+  test: "go test ./..."
+  lint: "golangci-lint run"
+
+heuristics:
+  - "Check for goroutine leaks."
+  - "Ensure context is passed properly and cancellation is handled."
+  - "Validate explicit error wrapping (%w) and handling."
+  - "Watch out for data races in concurrent maps/slices."
+  - "Check for unclosed files or response bodies (defer close)."
