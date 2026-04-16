@@ -1,6 +1,6 @@
 {
   "ollama_url": "http://localhost:11434/api/generate",
-  "model_name": "gemma4:26b",
+  "model_name": "qwen2.5:72b",
   "max_diff_lines": 2000,
   "max_retries": 3,
   "test_command": "go test ./...",
