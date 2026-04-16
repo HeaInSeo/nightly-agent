@@ -42,8 +42,12 @@ def main():
                     "path": st.get("best_patch_path", "N/A")
                 })
                 
-    summary_template = env.get_template("templates/summary.md.j2")
-    final_summary = summary_template.render(fix_candidates=candidates)
+    lang = agent.config.get("language", "ko")
+    summary_template = env.get_template(f"templates/{lang}/summary.md.j2")
+    final_summary = summary_template.render(
+        fix_candidates=candidates,
+        model_name=agent.config.get("model_name", "Unknown")
+    )
     
     with open(os.path.join(run_dir, "summary.md"), "w") as f:
         f.write(final_summary)

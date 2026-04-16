@@ -11,7 +11,7 @@ CONFIG_FILE = "config.json"
 PROJECTS_FILE = "configs/projects.yaml"
 
 def run_cmd(cmd, cwd="."):
-    result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     return result.stdout.strip(), result.stderr.strip(), result.returncode
 
 class AgentState:

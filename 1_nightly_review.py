@@ -98,8 +98,14 @@ def main():
         prompt_template = env.get_template(f"prompts/review/{p_type}.md.j2")
         rendered_prompt = prompt_template.render(heuristics=agent.heuristics, diff_text=diff_text)
         
+        lang = config.get("language", "ko")
+        
         # Force JSON constraint
         json_directive = "\n\nOutput ONLY valid JSON string mapped to this exact struct: {\"one_line_summary\":\"\",\"top_issues\":[{\"id\":\"1\",\"title\":\"\",\"severity\":\"high\",\"target_files\":[\"\"],\"suggested_action\":\"\"}],\"categorize\":{\"features\":0,\"refactor\":0,\"config\":0,\"tests\":0,\"infra\":0},\"llm_review\":{\"bugs\":\"\",\"regressions\":\"\",\"missing_tests\":\"\",\"architecture\":\"\",\"performance\":\"\"}}"
+        if lang == "ko":
+            json_directive += "\nALL text inside the JSON values MUST be written in Korean."
+        else:
+            json_directive += "\nALL text inside the JSON values MUST be written in English."
         
         ai_res = ask_ollama(rendered_prompt + json_directive, config)
         try:
@@ -107,7 +113,7 @@ def main():
         except Exception:
             ai_data = {"top_issues": []}
 
-        report_template = env.get_template("templates/report.md.j2")
+        report_template = env.get_template(f"templates/{lang}/report.md.j2")
         final_report = report_template.render(
             project_name=agent.project_name,
             current_date=state["created_at"],

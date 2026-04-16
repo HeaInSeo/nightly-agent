@@ -5,3 +5,4 @@ __pycache__/
 .env
 .nightly_agent/runs/
 .nightly_agent/sandbox_worktree/
+venv/

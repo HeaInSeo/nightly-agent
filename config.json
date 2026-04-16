@@ -4,5 +4,6 @@
   "max_diff_lines": 2000,
   "max_retries": 3,
   "test_command": "go test ./...",
-  "base_branch": "master"
+  "base_branch": "master",
+  "language": "ko"
 }
