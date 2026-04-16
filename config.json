@@ -5,5 +5,6 @@
   "max_retries": 3,
   "test_command": "go test ./...",
   "base_branch": "master",
-  "language": "ko"
+  "language": "ko",
+  "discord_webhook_url": ""
 }

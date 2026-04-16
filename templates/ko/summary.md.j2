@@ -1,23 +1,14 @@
 # 에이전트 모닝 요약 리포트
 **사용된 AI 모델**: `{{ model_name }}`
 
-## 생성된 패치 후보군
+## 프로젝트별 리뷰 결과
 {% if fix_candidates %}
 {% for patch in fix_candidates %}
-- **대상 이슈**: {{ patch.target_issue }}
-- **상태**: {{ patch.status }} ({{ patch.reason }})
-- **위치**: `{{ patch.path }}`
+### {{ patch.project_name }}
+- **리뷰 상태**: {{ patch.review_status }}
+- **발견 이슈**: {{ patch.issue_count }}건{% if patch.top_issues %} ({% for iss in patch.top_issues %}{{ iss.severity }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
+- **패치 검증**: {{ patch.status }} ({{ patch.reason }})
 {% endfor %}
 {% else %}
-- 요청되었거나 생성된 패치가 없습니다.
+- 분석된 프로젝트가 없습니다.
 {% endif %}
-
-## 오늘의 액션 플랜
-**오전에 즉시 확인해야 할 항목**:
-- 각 프로젝트 폴더의 `review_report.md` 내 최우선 이슈 검토
-{% if fix_candidates %}
-- `git apply --check candidate.patch` 명령어로 샌드박스의 자동 생성 패치 확인
-{% endif %}
-
-**나중에 확인해도 되는 항목**:
-- 경미한 리팩토링 권고 사항 및 린트 에러

@@ -1,23 +1,14 @@
-# Morning Agent Summary
+# Morning Agent Summary Report
 **AI Model Used**: `{{ model_name }}`
 
-## Candidates Generated
+## Review Results by Project
 {% if fix_candidates %}
 {% for patch in fix_candidates %}
-- **Target Issue**: {{ patch.target_issue }}
-- **Status**: {{ patch.status }} ({{ patch.reason }})
-- **Location**: `{{ patch.path }}`
+### {{ patch.project_name }}
+- **Review Status**: {{ patch.review_status }}
+- **Issues Found**: {{ patch.issue_count }}{% if patch.top_issues %} ({% for iss in patch.top_issues %}{{ iss.severity }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
+- **Patch Validation**: {{ patch.status }} ({{ patch.reason }})
 {% endfor %}
 {% else %}
-- No patches requested or generated.
+- No projects were analyzed.
 {% endif %}
-
-## Action Plan
-**Do This Morning**:
-- Review top issues in `review_report.md`
-{% if fix_candidates %}
-- Inspect `candidate.patch` via `git apply --check`
-{% endif %}
-
-**Can Be Deferred**:
-- Minor refactoring and lint errors.
