@@ -30,6 +30,45 @@ def past_deadline(deadline_hour, deadline_minute):
     now = datetime.datetime.now()
     return (now.hour * 60 + now.minute) >= (deadline_hour * 60 + deadline_minute)
 
+
+def sync_project(proj):
+    """Phase -1: 원격 저장소와 동기화. 반환값: 'ok' | 'skipped' | 'conflict'."""
+    path = proj.get("path", "")
+    name = proj.get("name", "")
+    branch = proj.get("base_branch", "main")
+
+    # HEAD~N 형식이면 실제 브랜치가 아니라 스킵
+    if branch.startswith("HEAD"):
+        return "ok"
+
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return "ok"
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", path] + list(args),
+            capture_output=True, text=True
+        )
+
+    ret = git("fetch", "origin", "--quiet")
+    if ret.returncode != 0:
+        print(f"  [{name}] fetch 실패 — 스킵 (오프라인?): {ret.stderr.strip()}")
+        return "skipped"
+
+    behind = git("rev-list", f"HEAD..origin/{branch}", "--count")
+    if behind.returncode != 0 or behind.stdout.strip() == "0":
+        return "ok"
+
+    count = behind.stdout.strip()
+    print(f"  [{name}] {count}개 커밋 뒤처짐. pull 시도...")
+    pull = git("pull", "--ff-only", "origin", branch)
+    if pull.returncode == 0:
+        print(f"  [{name}] pull 완료.")
+        return "ok"
+    else:
+        print(f"  [{name}] fast-forward 불가 — 스킵 (로컬 변경 충돌?): {pull.stderr.strip()}")
+        return "conflict"
+
 def main():
     args = parse_args()
 
@@ -102,6 +141,9 @@ def main():
             break
 
         print(f"\n--- [{idx+1}/{len(projects)}] Processing Project: {pname} ---")
+
+        print(f"[{pname}] Running Phase -1 (Sync)...")
+        sync_project(proj)
 
         print(f"[{pname}] Running Phase 0.5 (Continuity Check)...")
         run_phase("0_issue_continuity.py", ["--project", pname, "--run-id", run_id])

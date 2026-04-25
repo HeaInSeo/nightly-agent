@@ -2,12 +2,14 @@
 """na — Nightly Agent CLI
 
 사용법:
-  na start       systemd 타이머 활성화 (매일 새벽 자동 실행)
-  na stop        systemd 타이머 비활성화
-  na scan        scan_paths 탐색 → 대화형 프로젝트 등록
-  na config      GitHub 저장소/토큰 설정
+  na start              systemd 타이머 활성화 (매일 새벽 자동 실행)
+  na stop               systemd 타이머 비활성화
+  na scan               scan_paths 탐색 → 대화형 프로젝트 등록
+  na add <GitHub URL>   GitHub 저장소 클론 후 자동 등록
+  na config             GitHub 저장소/토큰 및 clone_roots 설정
 """
 import os
+import re
 import sys
 import json
 import subprocess
@@ -53,17 +55,17 @@ def save_projects(projects):
         yaml.dump({"projects": projects}, f, allow_unicode=True, default_flow_style=False)
 
 
-def detect_type(path):
-    """파일 목록으로 프로젝트 타입 감지."""
+def detect_types(path):
+    """파일 목록으로 프로젝트 타입 목록 감지."""
     try:
         entries = os.listdir(path)
     except PermissionError:
-        return None
+        return []
+    detected = []
     for ptype, markers in TYPE_MARKERS.items():
-        for marker in markers:
-            if any(e == marker or e.endswith(marker) for e in entries):
-                return ptype
-    return None
+        if any(any(e == m or e.endswith(m) for e in entries) for m in markers):
+            detected.append(ptype)
+    return detected
 
 
 def cmd_start():
@@ -80,6 +82,96 @@ def cmd_stop():
         print("Nightly Agent 중지됨.")
     else:
         print(f"중지 실패. sudo 권한이 필요할 수 있습니다: sudo systemctl stop {SERVICE_NAME}.timer")
+
+
+def _parse_github_url(url):
+    """GitHub URL에서 (owner, repo) 추출. 실패 시 None 반환."""
+    url = url.strip().rstrip("/")
+    # https://github.com/owner/repo  or  git@github.com:owner/repo
+    patterns = [
+        r"https?://github\.com/([^/]+)/([^/\.]+?)(?:\.git)?$",
+        r"git@github\.com:([^/]+)/([^/\.]+?)(?:\.git)?$",
+    ]
+    for pat in patterns:
+        m = re.match(pat, url)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def _infer_clone_root(ptype, cfg):
+    """config의 clone_roots에서 타입별 기본 경로 반환."""
+    clone_roots = cfg.get("clone_roots", {})
+    return clone_roots.get(ptype)
+
+
+def _register_project(path, name, github_url, projects):
+    """projects 리스트에 프로젝트 레코드를 추가하고 저장한다."""
+    entry = {
+        "name": name,
+        "path": path,
+        "base_branch": "main",
+        "github_url": github_url,
+        "review": {"include": [], "exclude": []},
+        "commands": {},
+    }
+    projects.append(entry)
+    save_projects(projects)
+    return entry
+
+
+def cmd_add(url):
+    parsed = _parse_github_url(url)
+    if not parsed:
+        print(f"유효하지 않은 GitHub URL: {url}")
+        print("형식 예: https://github.com/owner/repo")
+        sys.exit(1)
+
+    owner, repo = parsed
+    cfg = load_config()
+    projects = load_projects()
+    registered_paths = {p.get("path") for p in projects}
+
+    # 임시 경로로 클론해서 타입 감지 후 올바른 위치로 이동
+    # 1단계: 타입 먼저 감지하기 위해 임시 클론
+    import tempfile, shutil
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = os.path.join(tmp_dir, repo)
+        print(f"클론 중: {url} → {tmp_path} (타입 감지용)")
+        ret = subprocess.run(["git", "clone", "--depth=1", url, tmp_path])
+        if ret.returncode != 0:
+            print("클론 실패.")
+            sys.exit(1)
+        ptypes = detect_types(tmp_path)
+        primary_type = ptypes[0] if ptypes else "shell"
+
+    clone_root = _infer_clone_root(primary_type, cfg)
+    if not clone_root:
+        print(f"clone_roots에 '{primary_type}' 타입 경로가 설정되지 않았습니다.")
+        print("config.json의 clone_roots를 확인해주세요.")
+        sys.exit(1)
+
+    dest = os.path.join(clone_root, owner, repo)
+    if dest in registered_paths:
+        print(f"이미 등록된 경로입니다: {dest}")
+        sys.exit(0)
+
+    if os.path.exists(dest):
+        print(f"디렉토리가 이미 존재합니다: {dest}")
+        print("해당 경로를 그대로 사용합니다.")
+    else:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        print(f"클론 중: {url} → {dest}")
+        ret = subprocess.run(["git", "clone", url, dest])
+        if ret.returncode != 0:
+            print("클론 실패.")
+            sys.exit(1)
+
+    _register_project(dest, repo, url, projects)
+    print(f"\n✅ [{repo}] 등록 완료")
+    print(f"   감지된 언어: {', '.join(ptypes) or '불명'}")
+    print(f"   경로: {dest}")
+    print(f"   GitHub: {url}")
 
 
 def cmd_scan():
@@ -100,13 +192,13 @@ def cmd_scan():
             full_path = os.path.join(base, name)
             if not os.path.isdir(full_path):
                 continue
-            ptype = detect_type(full_path)
-            if not ptype:
+            ptypes = detect_types(full_path)
+            if not ptypes:
                 continue
             detected.append({
                 "name": name,
                 "path": full_path,
-                "type": ptype,
+                "types": ptypes,
                 "registered": full_path in registered_paths,
             })
 
@@ -117,7 +209,8 @@ def cmd_scan():
     print("\n감지된 프로젝트:")
     for i, p in enumerate(detected, 1):
         status = "✅ 이미 등록됨" if p["registered"] else "➕ 미등록"
-        print(f"  [{i}] {p['name']:<20} {p['path']:<55} ({p['type']:<12}) {status}")
+        types_str = ",".join(p["types"])
+        print(f"  [{i}] {p['name']:<20} {p['path']:<55} ({types_str:<16}) {status}")
 
     unregistered = [p for p in detected if not p["registered"]]
     if not unregistered:
@@ -147,11 +240,32 @@ def cmd_scan():
         if p["registered"]:
             print(f"  [{p['name']}] 이미 등록됨 — 스킵")
             continue
+
+        # GitHub URL 입력 (선택)
+        github_url = input(
+            f"  [{p['name']}] GitHub URL (없으면 Enter 스킵): "
+        ).strip()
+
+        # git remote에서 자동 감지 시도
+        if not github_url:
+            try:
+                result = subprocess.run(
+                    ["git", "-C", p["path"], "remote", "get-url", "origin"],
+                    capture_output=True, text=True
+                )
+                if result.returncode == 0:
+                    candidate = result.stdout.strip()
+                    if _parse_github_url(candidate):
+                        github_url = candidate
+                        print(f"    remote에서 자동 감지: {github_url}")
+            except Exception:
+                pass
+
         existing_projects.append({
             "name": p["name"],
             "path": p["path"],
-            "type": p["type"],
             "base_branch": "main",
+            "github_url": github_url or "",
             "review": {"include": [], "exclude": []},
             "commands": {},
         })
@@ -180,6 +294,18 @@ def cmd_config():
     if token:
         gh["token"] = token
     cfg["github"] = gh
+
+    # clone_roots 설정
+    print("\nclone_roots 설정 (타입별 클론 기본 경로, Enter로 현재값 유지)")
+    print("------------------------------------------------------------------")
+    clone_roots = cfg.get("clone_roots", {})
+    for ptype in ["go", "rust", "dotnet", "typescript", "python", "shell", "infra"]:
+        current = clone_roots.get(ptype, "")
+        val = input(f"  {ptype:<12} [{current or '미설정'}]: ").strip()
+        if val:
+            clone_roots[ptype] = val
+    cfg["clone_roots"] = clone_roots
+
     save_config(cfg)
     print("\n✅ config.json 업데이트 완료")
 
@@ -196,6 +322,11 @@ def main():
         cmd_stop()
     elif cmd == "scan":
         cmd_scan()
+    elif cmd == "add":
+        if len(sys.argv) < 3:
+            print("사용법: na add <GitHub URL>")
+            sys.exit(1)
+        cmd_add(sys.argv[2])
     elif cmd == "config":
         cmd_config()
     else:

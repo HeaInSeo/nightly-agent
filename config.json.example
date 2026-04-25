@@ -19,6 +19,16 @@
     "/opt/python/src/github.com/HeaInSeo"
   ],
 
+  "clone_roots": {
+    "go":         "/opt/go/src/github.com",
+    "rust":       "/opt/rust/src/github.com",
+    "dotnet":     "/opt/dotnet/src/github.com",
+    "typescript": "/opt/node/src/github.com",
+    "python":     "/opt/python/src/github.com",
+    "shell":      "/opt/shell/src/github.com",
+    "infra":      "/opt/infra/src/github.com"
+  },
+
   "cron_hour": "2am",
   "cron_min": 0,
   "deadline_hour": "8am",

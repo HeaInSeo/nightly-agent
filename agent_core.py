@@ -124,16 +124,25 @@ class AgentState:
             if not self.project_context:
                 raise ValueError(f"Project {project_name} not found in configs/projects.yaml")
                 
-            p_type = self.project_context.get('type')
-            profile_path = f"configs/profiles/{p_type}.yaml"
-            profile = {}
-            if os.path.exists(profile_path):
+            # 타입은 프로젝트 경로에서 런타임 자동 감지 (YAML에 type 필드 불필요)
+            p_types = self._detect_types(self.project_context.get('path', ''))
+
+            self.merged_commands = {}
+            seen_heuristics = []
+            for pt in p_types:
+                profile_path = f"configs/profiles/{pt}.yaml"
+                if not os.path.exists(profile_path):
+                    continue
                 with open(profile_path, "r") as f:
                     profile = yaml.safe_load(f) or {}
-                    
-            self.merged_commands = profile.get("default_commands", {}).copy()
+                for k, v in profile.get("default_commands", {}).items():
+                    self.merged_commands.setdefault(k, v)
+                for h in profile.get("heuristics", []):
+                    if h not in seen_heuristics:
+                        seen_heuristics.append(h)
             self.merged_commands.update(self.project_context.get("commands", {}))
-            self.heuristics = profile.get("heuristics", [])
+            self.heuristics = seen_heuristics
+            self.project_types = p_types
 
         if run_id == "latest":
             runs_dir = os.path.join(AGENT_DIR, "runs")
@@ -156,6 +165,28 @@ class AgentState:
         self.lock_file = os.path.join(self.project_run_dir, "run.lock")
         self.lock_fd = None
         os.makedirs(self.project_run_dir, exist_ok=True)
+
+    _TYPE_MARKERS = {
+        "go":         ["go.mod"],
+        "rust":       ["Cargo.toml"],
+        "dotnet":     [".csproj", ".sln"],
+        "typescript": ["package.json", "tsconfig.json"],
+        "python":     ["pyproject.toml", "setup.py", "requirements.txt"],
+        "infra":      [".tf", ".hcl"],
+        "shell":      [".sh"],
+    }
+
+    def _detect_types(self, path):
+        """프로젝트 경로에서 파일 목록을 보고 해당하는 모든 타입을 반환한다."""
+        try:
+            entries = os.listdir(path)
+        except (PermissionError, FileNotFoundError):
+            return []
+        detected = []
+        for ptype, markers in self._TYPE_MARKERS.items():
+            if any(any(e == m or e.endswith(m) for e in entries) for m in markers):
+                detected.append(ptype)
+        return detected
 
     def generate_run_id(self):
         return datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")

@@ -1,7 +1,7 @@
 projects:
   - name: dag-go
     path: /opt/go/src/github.com/HeaInSeo/dag-go
-    type: go
+    github_url: https://github.com/HeaInSeo/dag-go
     base_branch: HEAD~3
     review:
       include:
@@ -15,7 +15,7 @@ projects:
 
   - name: tori
     path: /opt/go/src/github.com/HeaInSeo/tori
-    type: go
+    github_url: https://github.com/HeaInSeo/tori
     base_branch: main
     review:
       include:
@@ -32,7 +32,7 @@ projects:
 
   - name: DagEdit
     path: /opt/dotnet/src/github.com/HeaInSeo/DagEdit
-    type: dotnet
+    github_url: https://github.com/HeaInSeo/DagEdit
     base_branch: main
     review:
       include:
@@ -49,7 +49,7 @@ projects:
 
   - name: multipass-k8s-lab
     path: /opt/go/src/github.com/HeaInSeo/multipass-k8s-lab
-    type: infra
+    github_url: https://github.com/HeaInSeo/multipass-k8s-lab
     base_branch: main
     review:
       include:

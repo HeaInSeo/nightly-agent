@@ -82,11 +82,13 @@ def main():
         
         env = Environment(loader=FileSystemLoader('.'))
 
-        # 3. Dynamic Prompting via Jinja
-        p_type = agent.project_context.get('type')
-        prompt_path = f"prompts/review/{p_type}.md.j2"
-        if not os.path.exists(prompt_path):
-            prompt_path = "prompts/review/generic.md.j2"
+        # 3. Dynamic Prompting via Jinja — 첫 번째 매칭 타입 프롬프트 사용
+        prompt_path = "prompts/review/generic.md.j2"
+        for pt in getattr(agent, 'project_types', []):
+            candidate = f"prompts/review/{pt}.md.j2"
+            if os.path.exists(candidate):
+                prompt_path = candidate
+                break
         prompt_template = env.get_template(prompt_path)
         rendered_prompt = prompt_template.render(heuristics=agent.heuristics, diff_text=diff_text)
         
