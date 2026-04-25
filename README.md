@@ -70,7 +70,18 @@ na config   # GitHub 토큰/저장소 및 clone_roots 대화형 설정
 | `max_diff_lines` | 이 줄 수 초과 diff는 리뷰 스킵 |
 | `language` | 리포트 언어 (`ko` / `en`) |
 | `cron_hour` | 실행 시각 (예: `"2am"`, `2`) |
-| `deadline_hour` | 이 시각 이후 남은 프로젝트 스킵 (예: `"8am"`) |
+| `deadline_hour` | 이 시각 이후 남은 프로젝트 스킵 (예: `"6am"`, `null`이면 마감 없음) |
+
+#### 마감 시간 설정 예시
+
+새벽 2시에 시작해서 오전 6시까지만 실행하려면:
+
+```json
+"cron_hour": "2am",
+"deadline_hour": "6am"
+```
+
+설정 변경 후 `sudo ./setup-ollama.sh` 재실행하면 타이머에 반영됩니다.
 
 ### `configs/projects.yaml`
 
