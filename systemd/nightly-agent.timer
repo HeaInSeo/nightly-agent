@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly Agent 타이머 — 매일 새벽 2시 실행
+Requires=nightly-agent.service
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

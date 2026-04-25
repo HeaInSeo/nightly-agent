@@ -1,14 +1,87 @@
-# Morning Agent Summary Report
-**AI Model Used**: `{{ model_name }}`
+# Nightly Agent Morning Summary Report
+**AI Model**: `{{ model_name }}`
 
-## Review Results by Project
-{% if fix_candidates %}
-{% for patch in fix_candidates %}
-### {{ patch.project_name }}
-- **Review Status**: {{ patch.review_status }}
-- **Issues Found**: {{ patch.issue_count }}{% if patch.top_issues %} ({% for iss in patch.top_issues %}{{ iss.severity }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
-- **Patch Validation**: {{ patch.status }} ({{ patch.reason }})
+---
+
+## Overall Status
+
+| Project | Branch | Review | Issues | Patch |
+|---------|--------|--------|--------|-------|
+{% for c in fix_candidates %}
+| {{ c.project_name }} | `{{ c.target_branch }}` | {% if c.review_status == "degraded" %}⚠️ degraded{% else %}{{ c.review_status }}{% endif %} | {{ c.issue_count }} | {{ c.fix_status }} |
+{% endfor %}
+
+---
+{% for c in fix_candidates %}
+
+## {{ c.project_name }}
+{% if c.review_status == "skipped" %}
+> No changes found — skipped.
+{% elif c.review_status == "failed" %}
+> Review failed: {{ c.error_message }}
+{% else %}
+**Branch**: `{{ c.target_branch }}` | **Commit**: `{{ c.target_commit }}`
+{% if c.review_status == "degraded" %}
+> ⚠️ **LLM parse failed (degraded)** — only build/test results are valid. Issue analysis was not performed.{% if c.llm_parse_error %} (`{{ c.llm_parse_error[:120] }}`){% endif %}
+{% endif %}
+{% if c.one_line_summary %}
+
+**Summary**: {{ c.one_line_summary }}
+{% endif %}
+
+### Build / Test / Lint
+{% if c.test_results %}
+{% for cmd_type, result in c.test_results.items() %}
+- **{{ cmd_type }}**: {{ result }}
 {% endfor %}
 {% else %}
-- No projects were analyzed.
+- No commands were executed
 {% endif %}
+
+### Top Issues
+{% if c.issues %}
+{% for iss in c.issues %}
+{{ loop.index }}. **[{{ iss.severity | upper }}] {{ iss.title }}**
+   - File: `{{ iss.target_files | join(', ') }}`
+   - Action: {{ iss.suggested_action }}
+{% endfor %}
+{% else %}
+- No issues found
+{% endif %}
+
+### Change Breakdown
+{% if c.categorize %}
+- Features: {{ c.categorize.get('features', 0) }} | Refactor: {{ c.categorize.get('refactor', 0) }} | Config: {{ c.categorize.get('config', 0) }} | Tests: {{ c.categorize.get('tests', 0) }} | Infra: {{ c.categorize.get('infra', 0) }}
+{% endif %}
+
+### LLM Review Details
+{% if c.llm_review %}
+{% if c.llm_review.get('bugs') %}**Bugs**: {{ c.llm_review.bugs }}{% endif %}
+
+{% if c.llm_review.get('regressions') %}**Regression Risk**: {{ c.llm_review.regressions }}{% endif %}
+
+{% if c.llm_review.get('missing_tests') %}**Missing Tests**: {{ c.llm_review.missing_tests }}{% endif %}
+
+{% if c.llm_review.get('architecture') %}**Architecture**: {{ c.llm_review.architecture }}{% endif %}
+
+{% if c.llm_review.get('performance') %}**Performance / Concurrency**: {{ c.llm_review.performance }}{% endif %}
+{% endif %}
+
+### Patch Candidate
+{% if c.fix_status == "success" %}
+- Status: Generated ({{ c.attempt_count }} attempt(s))
+- File: `{{ c.best_patch_path }}`
+{% if c.fix_note and "baseline_broken" in c.fix_note %}
+- ⚠️ **Baseline was red**: tests were already failing before the patch. The patch applies cleanly but whether it improves test results needs manual verification.
+{% endif %}
+{% elif c.fix_status == "max_retries_reached" %}
+- Status: Max retries exceeded ({{ c.attempt_count }} attempt(s))
+{% elif c.fix_status == "skipped" %}
+- Status: Skipped — no issues to fix
+{% else %}
+- Status: {{ c.fix_status }}
+{% endif %}
+{% endif %}
+
+---
+{% endfor %}

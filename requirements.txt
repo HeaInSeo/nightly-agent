@@ -1,3 +1,4 @@
 requests
 PyYAML
 Jinja2
+PyGithub

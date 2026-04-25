@@ -1,14 +1,87 @@
-# 에이전트 모닝 요약 리포트
-**사용된 AI 모델**: `{{ model_name }}`
+# 나이틀리 에이전트 모닝 요약 리포트
+**AI 모델**: `{{ model_name }}`
 
-## 프로젝트별 리뷰 결과
-{% if fix_candidates %}
-{% for patch in fix_candidates %}
-### {{ patch.project_name }}
-- **리뷰 상태**: {{ patch.review_status }}
-- **발견 이슈**: {{ patch.issue_count }}건{% if patch.top_issues %} ({% for iss in patch.top_issues %}{{ iss.severity }}{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}
-- **패치 검증**: {{ patch.status }} ({{ patch.reason }})
+---
+
+## 전체 현황
+
+| 프로젝트 | 브랜치 | 리뷰 | 이슈 수 | 패치 |
+|----------|--------|------|---------|------|
+{% for c in fix_candidates %}
+| {{ c.project_name }} | `{{ c.target_branch }}` | {% if c.review_status == "degraded" %}⚠️ degraded{% else %}{{ c.review_status }}{% endif %} | {{ c.issue_count }} | {{ c.fix_status }} |
+{% endfor %}
+
+---
+{% for c in fix_candidates %}
+
+## {{ c.project_name }}
+{% if c.review_status == "skipped" %}
+> 변경 사항 없음 — 스킵되었습니다.
+{% elif c.review_status == "failed" %}
+> 리뷰 실패: {{ c.error_message }}
+{% else %}
+**브랜치**: `{{ c.target_branch }}` | **커밋**: `{{ c.target_commit }}`
+{% if c.review_status == "degraded" %}
+> ⚠️ **LLM 파싱 실패 (degraded)** — 빌드/테스트 결과만 유효합니다. LLM 이슈 분석은 수행되지 않았습니다.{% if c.llm_parse_error %} (`{{ c.llm_parse_error[:120] }}`){% endif %}
+{% endif %}
+{% if c.one_line_summary %}
+
+**한줄 평가**: {{ c.one_line_summary }}
+{% endif %}
+
+### 빌드 / 테스트 / 린트
+{% if c.test_results %}
+{% for cmd_type, result in c.test_results.items() %}
+- **{{ cmd_type }}**: {{ result }}
 {% endfor %}
 {% else %}
-- 분석된 프로젝트가 없습니다.
+- 실행된 명령 없음
 {% endif %}
+
+### 주요 이슈
+{% if c.issues %}
+{% for iss in c.issues %}
+{{ loop.index }}. **[{{ iss.severity | upper }}] {{ iss.title }}**
+   - 파일: `{{ iss.target_files | join(', ') }}`
+   - 권고: {{ iss.suggested_action }}
+{% endfor %}
+{% else %}
+- 발견된 이슈 없음
+{% endif %}
+
+### 변경 분류
+{% if c.categorize %}
+- 기능 추가/수정: {{ c.categorize.get('features', 0) }} | 리팩토링: {{ c.categorize.get('refactor', 0) }} | 설정: {{ c.categorize.get('config', 0) }} | 테스트: {{ c.categorize.get('tests', 0) }} | 인프라: {{ c.categorize.get('infra', 0) }}
+{% endif %}
+
+### LLM 상세 리뷰
+{% if c.llm_review %}
+{% if c.llm_review.get('bugs') %}**버그**: {{ c.llm_review.bugs }}{% endif %}
+
+{% if c.llm_review.get('regressions') %}**회귀 위험**: {{ c.llm_review.regressions }}{% endif %}
+
+{% if c.llm_review.get('missing_tests') %}**누락 테스트**: {{ c.llm_review.missing_tests }}{% endif %}
+
+{% if c.llm_review.get('architecture') %}**아키텍처**: {{ c.llm_review.architecture }}{% endif %}
+
+{% if c.llm_review.get('performance') %}**성능/동시성**: {{ c.llm_review.performance }}{% endif %}
+{% endif %}
+
+### 패치 후보
+{% if c.fix_status == "success" %}
+- 상태: 생성 완료 ({{ c.attempt_count }}회 시도)
+- 파일: `{{ c.best_patch_path }}`
+{% if c.fix_note and "baseline_broken" in c.fix_note %}
+- ⚠️ **baseline red**: 패치 적용 전부터 테스트가 실패 상태였습니다. 패치는 적용되었으나 테스트 결과가 개선됐는지 별도 확인이 필요합니다.
+{% endif %}
+{% elif c.fix_status == "max_retries_reached" %}
+- 상태: 최대 재시도 초과 ({{ c.attempt_count }}회 시도)
+{% elif c.fix_status == "skipped" %}
+- 상태: 이슈 없어 스킵
+{% else %}
+- 상태: {{ c.fix_status }}
+{% endif %}
+{% endif %}
+
+---
+{% endfor %}

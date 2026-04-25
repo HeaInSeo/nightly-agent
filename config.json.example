@@ -1,10 +1,26 @@
 {
-  "ollama_url": "http://localhost:11434/api/generate",
-  "model_name": "qwen2.5:72b",
+  "llm": {
+    "api_base_url": "http://localhost:11434/v1",
+    "model_name": "qwen3.6:27b",
+    "api_key": ""
+  },
   "max_diff_lines": 2000,
   "max_retries": 3,
-  "test_command": "go test ./...",
-  "base_branch": "master",
   "language": "ko",
-  "discord_webhook_url": ""
+
+  "github": {
+    "token": "",
+    "reports_repo": "HeaInSeo/nightly-agent-reports"
+  },
+
+  "scan_paths": [
+    "/opt/go/src/github.com/HeaInSeo",
+    "/opt/dotnet/src/github.com/HeaInSeo",
+    "/opt/python/src/github.com/HeaInSeo"
+  ],
+
+  "cron_hour": "2am",
+  "cron_min": 0,
+  "deadline_hour": "8am",
+  "deadline_minute": 0
 }

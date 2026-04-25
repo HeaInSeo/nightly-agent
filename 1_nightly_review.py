@@ -1,19 +1,8 @@
 import os
 import sys
 import json
-import requests
 from jinja2 import Environment, FileSystemLoader
-from agent_core import AgentState, run_cmd, parse_args
-
-def ask_ollama(prompt, conf):
-    url = conf.get("ollama_url", "http://localhost:11434/api/generate")
-    model = conf.get("model_name", "gemma4:26b")
-    try:
-        response = requests.post(url, json={"model": model, "prompt": prompt, "stream": False}, timeout=600)
-        response.raise_for_status()
-        return response.json().get("response", "")
-    except Exception as e:
-        raise RuntimeError(f"Ollama API Call Failed: {e}")
+from agent_core import AgentState, run_cmd, parse_args, ask_llm
 
 def get_filtered_diff(agent, state, cwd):
     base_branch = agent.project_context.get("base_branch", "main")
@@ -92,26 +81,57 @@ def main():
         state["base_branch"] = agent.project_context.get('base_branch')
         
         env = Environment(loader=FileSystemLoader('.'))
-        
+
         # 3. Dynamic Prompting via Jinja
         p_type = agent.project_context.get('type')
-        prompt_template = env.get_template(f"prompts/review/{p_type}.md.j2")
+        prompt_path = f"prompts/review/{p_type}.md.j2"
+        if not os.path.exists(prompt_path):
+            prompt_path = "prompts/review/generic.md.j2"
+        prompt_template = env.get_template(prompt_path)
         rendered_prompt = prompt_template.render(heuristics=agent.heuristics, diff_text=diff_text)
         
         lang = config.get("language", "ko")
         
-        # Force JSON constraint
-        json_directive = "\n\nOutput ONLY valid JSON string mapped to this exact struct: {\"one_line_summary\":\"\",\"top_issues\":[{\"id\":\"1\",\"title\":\"\",\"severity\":\"high\",\"target_files\":[\"\"],\"suggested_action\":\"\"}],\"categorize\":{\"features\":0,\"refactor\":0,\"config\":0,\"tests\":0,\"infra\":0},\"llm_review\":{\"bugs\":\"\",\"regressions\":\"\",\"missing_tests\":\"\",\"architecture\":\"\",\"performance\":\"\"}}"
+        # anchor 포함 확장 JSON 스키마로 LLM에 요청
+        json_directive = (
+            "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
+            '{"one_line_summary":"","top_issues":[{'
+            '"title":"",'
+            '"severity":"high|medium|low",'
+            '"target_files":[""],'
+            '"anchor":{"file":"","function":"","snippet":"3-5 lines of problematic code"},'
+            '"what_is_wrong":"",'
+            '"why_dangerous":"",'
+            '"suggested_action":""'
+            '}],'
+            '"categorize":{"features":0,"refactor":0,"config":0,"tests":0,"infra":0},'
+            '"llm_review":{"bugs":"","regressions":"","missing_tests":"","architecture":"","performance":"","security":""}}'
+        )
         if lang == "ko":
             json_directive += "\nALL text inside the JSON values MUST be written in Korean."
         else:
             json_directive += "\nALL text inside the JSON values MUST be written in English."
-        
-        ai_res = ask_ollama(rendered_prompt + json_directive, config)
+
+        ai_res = ask_llm(rendered_prompt + json_directive, config)
+        llm_parse_ok = False
         try:
             ai_data = json.loads(ai_res.replace("```json", "").replace("```", "").strip())
-        except Exception:
-            ai_data = {"top_issues": []}
+            llm_parse_ok = True
+        except Exception as parse_err:
+            ai_data = {"top_issues": [], "one_line_summary": "", "categorize": {}, "llm_review": {}}
+            state["llm_parse_error"] = str(parse_err)
+            state["llm_raw_snippet"] = ai_res[:300] if ai_res else ""
+
+        # 린트 실패 시 에러 내용 상세 포함 (기존: SUCCESS/FAILED만)
+        detailed_test_results = {}
+        for cmd_type in ["build", "test", "lint", "validate"]:
+            cmd = agent.merged_commands.get(cmd_type)
+            if cmd:
+                out, err, code = run_cmd(cmd, cwd=cwd)
+                if code == 0:
+                    detailed_test_results[cmd_type] = {"status": "SUCCESS", "output": ""}
+                else:
+                    detailed_test_results[cmd_type] = {"status": "FAILED", "output": err[-1000:]}
 
         report_template = env.get_template(f"templates/{lang}/report.md.j2")
         final_report = report_template.render(
@@ -122,26 +142,37 @@ def main():
             merge_base=merge_base,
             changed_files_count=len([l for l in diff_text.splitlines() if l.startswith('+++')]),
             diff_lines_count=diff_lines,
-            status_review="Done",
+            status_review="Degraded" if not llm_parse_ok else "Done",
             status_fix="Pending",
             one_line_summary=ai_data.get("one_line_summary", ""),
             top_issues=ai_data.get("top_issues", []),
             categorize=ai_data.get("categorize", {}),
-            test_results=test_results,
+            test_results=detailed_test_results,
             llm_review=ai_data.get("llm_review", {})
         )
 
         report_path = os.path.join(agent.get_run_dir(), "review_report.md")
         with open(report_path, "w") as f:
             f.write(final_report)
-            
+
+        # issues.json: UUID + anchor 포함 확장 스키마로 저장
+        from agent_core import make_issue_record
+        run_issues = []
+        for iss in ai_data.get("top_issues", []):
+            run_issues.append(make_issue_record(iss, agent.run_id, state["target_commit"]))
+
         issues_path = os.path.join(agent.get_run_dir(), "issues.json")
         with open(issues_path, "w") as f:
-            json.dump(ai_data.get("top_issues", []), f, indent=4)
+            json.dump(run_issues, f, indent=4, ensure_ascii=False)
 
         state["review_report_path"] = report_path
         state["issues_file"] = issues_path
-        state["status_p1_review"] = "success"
+        state["one_line_summary"] = ai_data.get("one_line_summary", "")
+        state["categorize"] = ai_data.get("categorize", {})
+        state["llm_review"] = ai_data.get("llm_review", {})
+        state["test_results"] = detailed_test_results
+        state["llm_parse_ok"] = llm_parse_ok
+        state["status_p1_review"] = "success" if llm_parse_ok else "degraded"
         agent.save_state(state)
 
     except Exception as e:

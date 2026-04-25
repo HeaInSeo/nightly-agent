@@ -1,7 +1,7 @@
 type: shell
 default_commands:
-  lint: "shellcheck *.sh"
-  test: "bash -n *.sh"
+  lint: "find . -name '*.sh' -not -path '*/vendor/*' -exec shellcheck {} +"
+  test: "find . -name '*.sh' -not -path '*/vendor/*' -exec bash -n {} +"
 
 heuristics:
   - "Ensure scripts use 'set -euo pipefail'."

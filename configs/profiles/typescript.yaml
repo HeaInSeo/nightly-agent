@@ -1,0 +1,13 @@
+type: typescript
+default_commands:
+  build: "tsc --noEmit"
+  test: "npm test"
+  lint: "eslint . --ext .ts,.tsx,.js,.jsx"
+
+heuristics:
+  - "Ensure strict null checks and avoid non-null assertions (!) without justification."
+  - "Watch for unhandled Promise rejections and missing await keywords."
+  - "Check for type assertions (as Type) that bypass runtime safety."
+  - "Verify proper cleanup in useEffect hooks to prevent memory leaks."
+  - "Check for direct mutations of state objects (must use immutable patterns)."
+  - "Validate that sensitive values are not leaked into client-side bundles."

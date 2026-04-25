@@ -1,0 +1,14 @@
+type: rust
+default_commands:
+  build: "cargo build"
+  test: "cargo test"
+  lint: "cargo clippy -- -D warnings"
+  format_check: "cargo fmt --check"
+
+heuristics:
+  - "Watch for unsafe blocks and verify their invariants are documented."
+  - "Check for potential integer overflow (use checked_add, saturating_add where appropriate)."
+  - "Ensure proper error propagation with ? operator instead of unwrap/expect in library code."
+  - "Verify that lifetimes are correctly scoped and no dangling references exist."
+  - "Check for unnecessary clones that could degrade performance."
+  - "Ensure async tasks are properly cancelled and resources are dropped."

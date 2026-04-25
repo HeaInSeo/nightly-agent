@@ -1,0 +1,14 @@
+type: python
+default_commands:
+  build: "python -m compileall -q ."
+  test: "pytest"
+  lint: "ruff check ."
+  type_check: "mypy ."
+
+heuristics:
+  - "Check for mutable default arguments in function signatures."
+  - "Ensure proper exception chaining (raise X from Y) and avoid bare except clauses."
+  - "Watch for SQL injection risks in string-formatted queries."
+  - "Verify resources are closed via context managers (with statement)."
+  - "Check for unintended use of global/mutable module-level state."
+  - "Ensure async functions are properly awaited and event loop usage is correct."

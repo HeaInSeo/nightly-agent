@@ -1,9 +1,22 @@
 projects:
+  - name: dag-go
+    path: /opt/go/src/github.com/HeaInSeo/dag-go
+    type: go
+    base_branch: HEAD~3
+    review:
+      include:
+        - "*.go"
+        - "*.mod"
+      exclude:
+        - vendor/**
+    commands:
+      build: "go build ./..."
+      test: "go test ./..."
+
   - name: tori
     path: /opt/go/src/github.com/HeaInSeo/tori
     type: go
     base_branch: main
-    diff_mode: merge-base
     review:
       include:
         - "*.go"
