@@ -23,6 +23,11 @@ def extract_patch(ai_response):
             patch_lines.append(line)
     return "\n".join(patch_lines) + "\n" if patch_lines else ai_response
 
+
+def summarize_test_output(stdout, stderr, limit=400):
+    combined = "\n".join(part for part in [stdout, stderr] if part).strip()
+    return combined[:limit]
+
 def main():
     args = parse_args()
     agent = AgentState(project_name=args.project, run_id=args.run_id)
@@ -69,11 +74,12 @@ def main():
         # 패치 적용 전 테스트를 먼저 실행해 기준값을 기록한다.
         # baseline이 이미 red인 경우, 패치 후 테스트도 red라고 해서
         # 정상 패치를 탈락시키지 않기 위한 안전장치다.
-        _, baseline_err, baseline_code = run_cmd(test_cmd, cwd=worktree_path)
+        baseline_out, baseline_err, baseline_code = run_cmd(test_cmd, cwd=worktree_path)
+        baseline_output = "\n".join(part for part in [baseline_out, baseline_err] if part).strip()
         state["baseline_test_code"] = baseline_code
         if baseline_code != 0:
             state["baseline_test_warning"] = (
-                f"Baseline test was already failing before patch: {baseline_err[:200]}"
+                f"Baseline test was already failing before patch: {summarize_test_output(baseline_out, baseline_err)}"
             )
         agent.save_state(state)
         # ────────────────────────────────────────────────────────────────
@@ -114,14 +120,25 @@ def main():
                     success = True
                     final_best_patch = patch_path
                     break
-                elif baseline_code != 0:
-                    # baseline이 이미 red였던 repo: 패치가 apply되면 조건부 성공.
-                    # 테스트 실패가 이 패치 때문인지 알 수 없으므로 탈락시키지 않는다.
+                elif baseline_code != 0 and test_code == baseline_code:
+                    test_output = "\n".join(part for part in [test_out, test_err] if part).strip()
+                    if test_output != baseline_output:
+                        feedback_log = (
+                            "Patch changed the failing test output on a repo that was already red.\n"
+                            f"Baseline output:\n{baseline_output[:1200]}\n\n"
+                            f"Current output:\n{test_output[:1200]}\n\n"
+                            "Do not introduce additional regressions. Keep the same failing baseline or make tests pass."
+                        )
+                        run_git(["reset", "--hard", "HEAD"], cwd=worktree_path)
+                        run_git(["clean", "-fd"], cwd=worktree_path)
+                        continue
+
+                    # baseline이 이미 red였던 repo: 동일한 실패 상태/출력 유지 시에만 조건부 성공.
                     success = True
                     final_best_patch = patch_path
                     state["fix_note"] = (
                         "baseline_broken: repo test was already failing before patch. "
-                        "Patch applies cleanly but test result unchanged."
+                        "Patch applies cleanly and the failing test output is unchanged."
                     )
                     break
                 else:

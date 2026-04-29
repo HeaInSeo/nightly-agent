@@ -17,6 +17,15 @@ REPORT_TEMPLATE = """\
 
 ---
 
+## 실행 타이밍
+| 단계 | 시작 | 종료 | 소요(초) |
+|------|------|------|---------|
+| 리뷰 전체 | {{ timing.review_started_at or '-' }} | {{ timing.review_finished_at or '-' }} | {{ timing.review_duration_sec if timing.review_duration_sec is not none else '-' }} |
+| 코드 리뷰/분석 | {{ timing.analysis_started_at or '-' }} | {{ timing.analysis_finished_at or '-' }} | {{ timing.analysis_duration_sec if timing.analysis_duration_sec is not none else '-' }} |
+| 보고서 작성 | {{ timing.report_started_at or '-' }} | {{ timing.report_finished_at or '-' }} | {{ timing.report_duration_sec if timing.report_duration_sec is not none else '-' }} |
+
+---
+
 ## 활성 이슈 ({{ active_issues | length }}건)
 {% if not active_issues %}
 발견된 활성 이슈 없음.
@@ -60,7 +69,7 @@ def severity_emoji(severity):
     return {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity.lower(), "⚪")
 
 
-def render_report(project_name, model_name, branch, commit):
+def render_report(project_name, model_name, branch, commit, timing=None):
     """issues_db를 읽어 고정 포맷 마크다운을 렌더링해 반환한다."""
     issues = load_issues_db(project_name)
     active = [i for i in issues if i.get("status") in ("open", "recurring", "derived")]
@@ -81,6 +90,7 @@ def render_report(project_name, model_name, branch, commit):
         model_name=model_name,
         branch=branch,
         commit=commit,
+        timing=timing or {},
         active_issues=active,
         resolved_issues=resolved,
     )
@@ -92,6 +102,9 @@ def push_reports(config, run_states):
     run_states: {project_name: state_dict} 형태.
     """
     gh_conf = config.get("github", {})
+    if not gh_conf.get("enabled", False):
+        print("GitHub 리포팅 비활성화됨. push를 건너뜁니다.")
+        return
     token = gh_conf.get("token", "").strip()
     repo_name = gh_conf.get("reports_repo", "").strip()
     model_name = config.get("llm", {}).get("model_name", "unknown")
@@ -116,7 +129,18 @@ def push_reports(config, run_states):
     for project_name, state in run_states.items():
         branch = state.get("target_branch", "")
         commit = state.get("target_commit", "")
-        content = render_report(project_name, model_name, branch, commit)
+        timing = {
+            "review_started_at": state.get("review_started_at"),
+            "review_finished_at": state.get("review_finished_at"),
+            "review_duration_sec": state.get("review_duration_sec"),
+            "analysis_started_at": state.get("analysis_started_at"),
+            "analysis_finished_at": state.get("analysis_finished_at"),
+            "analysis_duration_sec": state.get("analysis_duration_sec"),
+            "report_started_at": state.get("report_started_at"),
+            "report_finished_at": state.get("report_finished_at"),
+            "report_duration_sec": state.get("report_duration_sec"),
+        }
+        content = render_report(project_name, model_name, branch, commit, timing=timing)
 
         file_path = f"reports/{project_name}.md"
         try:

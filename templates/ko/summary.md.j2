@@ -1,5 +1,6 @@
 # 나이틀리 에이전트 모닝 요약 리포트
 **AI 모델**: `{{ model_name }}`
+**요약 작성 시간**: {{ summary_started_at }} → {{ summary_finished_at }} ({{ summary_duration_sec if summary_duration_sec is not none else '-' }}초)
 
 ---
 
@@ -21,6 +22,7 @@
 > 리뷰 실패: {{ c.error_message }}
 {% else %}
 **브랜치**: `{{ c.target_branch }}` | **커밋**: `{{ c.target_commit }}`
+**실행 타이밍**: 리뷰 {{ c.review_started_at or '-' }} → {{ c.review_finished_at or '-' }} ({{ c.review_duration_sec if c.review_duration_sec is not none else '-' }}초) | 분석 {{ c.analysis_started_at or '-' }} → {{ c.analysis_finished_at or '-' }} ({{ c.analysis_duration_sec if c.analysis_duration_sec is not none else '-' }}초) | 보고서 {{ c.report_started_at or '-' }} → {{ c.report_finished_at or '-' }} ({{ c.report_duration_sec if c.report_duration_sec is not none else '-' }}초)
 {% if c.review_status == "degraded" %}
 > ⚠️ **LLM 파싱 실패 (degraded)** — 빌드/테스트 결과만 유효합니다. LLM 이슈 분석은 수행되지 않았습니다.{% if c.llm_parse_error %} (`{{ c.llm_parse_error[:120] }}`){% endif %}
 {% endif %}
@@ -32,7 +34,7 @@
 ### 빌드 / 테스트 / 린트
 {% if c.test_results %}
 {% for cmd_type, result in c.test_results.items() %}
-- **{{ cmd_type }}**: {{ result }}
+- **{{ cmd_type }}**: {{ result.status }}{% if result.output %} — {{ result.output }}{% endif %}
 {% endfor %}
 {% else %}
 - 실행된 명령 없음

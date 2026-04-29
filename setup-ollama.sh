@@ -29,7 +29,7 @@ print(v if v is not None else 2)" 2>/dev/null || echo 2)
 
     CRON_MIN=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('cron_min', 0))" 2>/dev/null || echo 0)
 
-    MODEL_NAME=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('model_name', 'qwen2.5:72b'))" 2>/dev/null || echo "qwen2.5:72b")
+    MODEL_NAME=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('llm', {}).get('model_name', 'qwen3.6:27b'))" 2>/dev/null || echo "qwen3.6:27b")
 
     DEADLINE_HOUR=$(python3 -c "$_PARSE_HOUR
 c=json.load(open('$CONFIG_FILE'))
@@ -40,7 +40,7 @@ print(v if v is not None else '')" 2>/dev/null || echo "")
 else
     CRON_HOUR=2
     CRON_MIN=0
-    MODEL_NAME="qwen2.5:72b"
+    MODEL_NAME="qwen3.6:27b"
     DEADLINE_HOUR=""
     DEADLINE_MIN=0
 fi

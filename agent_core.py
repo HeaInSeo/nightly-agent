@@ -56,6 +56,34 @@ def parse_hour(value):
         return h
     return int(value)
 
+
+def now_iso():
+    return datetime.datetime.now().isoformat(timespec="seconds")
+
+
+def parse_iso_datetime(value):
+    """Python 3.6 호환 ISO datetime 파서."""
+    if not value:
+        return None
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        try:
+            return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f")
+        except ValueError:
+            return None
+
+
+def elapsed_seconds(started_at, finished_at):
+    """ISO 시각 두 개 사이의 경과 초를 계산한다."""
+    if not started_at or not finished_at:
+        return None
+    start_dt = parse_iso_datetime(started_at)
+    end_dt = parse_iso_datetime(finished_at)
+    if not start_dt or not end_dt:
+        return None
+    return round((end_dt - start_dt).total_seconds(), 3)
+
 def ask_llm(prompt, config):
     """OpenAI 호환 API로 LLM에 프롬프트를 전송하고 응답 문자열을 반환한다.
     Ollama, vLLM, TGI, SGLang 등 OpenAI 호환 엔진 모두 지원."""
@@ -236,7 +264,7 @@ class AgentState:
         return {
             "run_id": self.run_id,
             "project_name": self.project_name,
-            "created_at": datetime.datetime.now().isoformat(),
+            "created_at": now_iso(),
             "target_commit": head,
             "target_branch": branch,
             "status_p1_review": "pending",

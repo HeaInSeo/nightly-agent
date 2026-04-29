@@ -2,13 +2,14 @@ import os
 import sys
 import json
 from jinja2 import Environment, FileSystemLoader
-from agent_core import AgentState, parse_args
+from agent_core import AgentState, parse_args, now_iso, elapsed_seconds
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 def main():
     args = parse_args()
-    agent = AgentState(run_id=args.run_id if args else "latest")
+    agent = AgentState(run_id=args.run_id if args.run_id else "latest")
+    summary_started_at = now_iso()
 
     env = Environment(loader=FileSystemLoader('.'))
 
@@ -55,14 +56,27 @@ def main():
             "llm_parse_ok": st.get("llm_parse_ok", True),
             "llm_parse_error": st.get("llm_parse_error", ""),
             "error_message": st.get("error_message", ""),
+            "review_started_at": st.get("review_started_at"),
+            "review_finished_at": st.get("review_finished_at"),
+            "review_duration_sec": st.get("review_duration_sec"),
+            "analysis_started_at": st.get("analysis_started_at"),
+            "analysis_finished_at": st.get("analysis_finished_at"),
+            "analysis_duration_sec": st.get("analysis_duration_sec"),
+            "report_started_at": st.get("report_started_at"),
+            "report_finished_at": st.get("report_finished_at"),
+            "report_duration_sec": st.get("report_duration_sec"),
         })
 
     lang = agent.config.get("language", "ko")
     model_name = agent.config.get("llm", {}).get("model_name", "Unknown")
+    summary_finished_at = now_iso()
     summary_template = env.get_template(f"templates/{lang}/summary.md.j2")
     final_summary = summary_template.render(
         fix_candidates=candidates,
         model_name=model_name,
+        summary_started_at=summary_started_at,
+        summary_finished_at=summary_finished_at,
+        summary_duration_sec=elapsed_seconds(summary_started_at, summary_finished_at),
     )
 
     summary_path = os.path.join(run_dir, "summary.md")

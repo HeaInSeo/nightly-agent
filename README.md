@@ -60,9 +60,10 @@ na config   # GitHub 토큰/저장소 및 clone_roots 대화형 설정
 
 | 필드 | 설명 |
 |------|------|
-| `llm.api_base_url` | OpenAI 호환 LLM 엔드포인트 (Ollama: `http://localhost:11434/v1`) |
+| `llm.api_base_url` | 현재는 Ollama 엔드포인트만 지원 (`http://localhost:11434/v1`) |
 | `llm.model_name` | 사용할 모델명 |
 | `llm.api_key` | API 키 (Ollama는 빈 문자열) |
+| `github.enabled` | `true`일 때만 GitHub 리포트 저장소에 push |
 | `github.token` | GitHub Personal Access Token |
 | `github.reports_repo` | 리포트를 push할 GitHub 저장소 (`owner/repo`) |
 | `scan_paths` | `na scan`이 탐색할 로컬 디렉토리 목록 |
@@ -118,7 +119,7 @@ projects:
 GitHub 리포트 저장소:
 ```
 {reports_repo}/
-  {project}/issues.md               ← 누적 이슈 현황 (자동 업데이트)
+  reports/{project}.md              ← 프로젝트별 누적 이슈 현황
   README.md                         ← 프로젝트별 최신 요약
 ```
 
@@ -143,11 +144,8 @@ GitHub 리포트 저장소:
 
 ## 지원 LLM 엔진
 
-`llm.api_base_url`만 변경하면 모든 OpenAI 호환 엔진을 사용할 수 있습니다.
+현재 구현은 Ollama 전용입니다. 실행 전 상태 확인이 Ollama API(`/api/tags`)를 사용하고, 설치 스크립트도 Ollama 모델 풀링을 전제로 합니다.
 
 | 엔진 | api_base_url |
 |------|-------------|
 | Ollama | `http://localhost:11434/v1` |
-| vLLM | `http://localhost:8000/v1` |
-| LM Studio | `http://localhost:1234/v1` |
-| OpenAI | `https://api.openai.com/v1` |
