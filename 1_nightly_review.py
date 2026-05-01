@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from jinja2 import Environment, FileSystemLoader
 from agent_core import AgentState, run_cmd, parse_args, ask_llm, now_iso, elapsed_seconds
 
@@ -47,6 +48,121 @@ def get_filtered_diff(agent, state, cwd):
         
     diff_text, err, code = run_cmd(diff_strategy, cwd=cwd)
     return diff_text, merge_base, ""
+
+
+def extract_changed_files(diff_text):
+    files = []
+    for line in diff_text.splitlines():
+        if line.startswith("+++ b/"):
+            files.append(line[6:])
+    return files
+
+
+def extract_go_function_names(diff_text):
+    names = []
+    pattern = re.compile(r"\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\b")
+    for line in diff_text.splitlines():
+        if not line.startswith("@@"):
+            continue
+        match = pattern.search(line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def find_go_function_excerpt(path, func_name, max_lines=60):
+    if not os.path.exists(path):
+        return ""
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    header_pattern = re.compile(rf"^\s*func\s+(?:\([^)]*\)\s*)?{re.escape(func_name)}\b")
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if header_pattern.search(line):
+            start_idx = idx
+            break
+    if start_idx is None:
+        return ""
+
+    comment_start = start_idx
+    while comment_start > 0:
+        prev = lines[comment_start - 1]
+        if prev.startswith("//") or not prev.strip():
+            comment_start -= 1
+            continue
+        break
+
+    end_idx = min(len(lines), start_idx + max_lines)
+    return "".join(lines[comment_start:end_idx]).rstrip()
+
+
+def build_review_context(diff_text, cwd):
+    changed_files = extract_changed_files(diff_text)[:3]
+    function_names = extract_go_function_names(diff_text)[:3]
+    blocks = []
+
+    for rel_path in changed_files:
+        abs_path = os.path.join(cwd, rel_path)
+        if not os.path.exists(abs_path):
+            continue
+
+        excerpt = ""
+        for func_name in function_names:
+            excerpt = find_go_function_excerpt(abs_path, func_name)
+            if excerpt:
+                blocks.append(f"[File] {rel_path}\n[Function] {func_name}\n{excerpt}")
+                break
+
+        if excerpt:
+            continue
+
+        with open(abs_path, "r") as f:
+            fallback = "".join(f.readlines()[:80]).rstrip()
+        if fallback:
+            blocks.append(f"[File] {rel_path}\n{fallback}")
+
+    return "\n\n".join(blocks[:3])
+
+
+def issue_looks_false_positive(issue, cwd):
+    anchor = issue.get("anchor") or {}
+    rel_path = anchor.get("file")
+    func_name = anchor.get("function")
+    if not rel_path or not func_name:
+        return False
+
+    excerpt = find_go_function_excerpt(os.path.join(cwd, rel_path), func_name, max_lines=80)
+    if not excerpt:
+        return False
+
+    issue_text = " ".join([
+        issue.get("title", ""),
+        issue.get("what_is_wrong", ""),
+        issue.get("suggested_action", ""),
+    ]).lower()
+    excerpt_lower = excerpt.lower()
+
+    if (
+        ("goroutine" in issue_text or "setlimit" in issue_text or "동시성 제한" in issue_text)
+        and "without a goroutine limit" in excerpt_lower
+        and "fan-in policy limits belong at the dag validation layer" in excerpt_lower
+    ):
+        return True
+
+    if (
+        (
+            "컨텍스트" in issue_text or
+            "취소" in issue_text or
+            "ctx.done" in issue_text or
+            "errgroup.withcontext" in issue_text or
+            "context" in issue_text
+        )
+        and "case <-egctx.done()" in excerpt_lower
+    ):
+        return True
+
+    return False
 
 def main():
     args = parse_args()
@@ -109,24 +225,39 @@ def main():
                 prompt_path = candidate
                 break
         prompt_template = env.get_template(prompt_path)
-        rendered_prompt = prompt_template.render(heuristics=agent.heuristics, diff_text=diff_text)
+        review_context = build_review_context(diff_text, cwd)
+        rendered_prompt = prompt_template.render(
+            heuristics=agent.heuristics,
+            diff_text=diff_text,
+            review_context=review_context,
+        )
         
         lang = config.get("language", "ko")
         
-        # anchor 포함 확장 JSON 스키마로 LLM에 요청
+        # 8B급 로컬 모델에서도 안정적으로 닫힌 JSON을 반환하도록
+        # 리뷰 스키마를 최소 필드만 남긴다.
         json_directive = (
             "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
             '{"one_line_summary":"","top_issues":[{'
             '"title":"",'
             '"severity":"high|medium|low",'
             '"target_files":[""],'
-            '"anchor":{"file":"","function":"","snippet":"3-5 lines of problematic code"},'
             '"what_is_wrong":"",'
-            '"why_dangerous":"",'
-            '"suggested_action":""'
-            '}],'
-            '"categorize":{"features":0,"refactor":0,"config":0,"tests":0,"infra":0},'
-            '"llm_review":{"bugs":"","regressions":"","missing_tests":"","architecture":"","performance":"","security":""}}'
+            '"suggested_action":"",'
+            '"anchor":{"file":"","function":""}'
+            '}]}'
+        )
+        json_directive += (
+            "\nReturn raw JSON only on a single line."
+            "\nDo not use markdown fences."
+            "\nReturn at most 2 top_issues."
+            "\nKeep one_line_summary under 80 characters."
+            "\nKeep each string field concise: 1 short sentence."
+            "\nOmit fields that are not listed in the schema."
+            "\nIf there is no meaningful issue, return an empty top_issues array."
+            "\nDo not report an issue when nearby comments or current code explicitly justify the behavior."
+            "\nTreat design-rationale comments as strong evidence unless the diff clearly breaks that contract."
+            "\nDo not invent concurrency bugs from heuristic suspicion alone."
         )
         if lang == "ko":
             json_directive += "\nALL text inside the JSON values MUST be written in Korean."
@@ -135,7 +266,12 @@ def main():
 
         state["analysis_started_at"] = now_iso()
         agent.save_state(state)
-        ai_res = ask_llm(rendered_prompt + json_directive, config)
+        ai_res = ask_llm(
+            rendered_prompt + json_directive,
+            config,
+            max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
+            response_format={"type": "json_object"},
+        )
         state["analysis_finished_at"] = now_iso()
         state["analysis_duration_sec"] = elapsed_seconds(
             state.get("analysis_started_at"), state.get("analysis_finished_at")
@@ -148,6 +284,15 @@ def main():
             ai_data = {"top_issues": [], "one_line_summary": "", "categorize": {}, "llm_review": {}}
             state["llm_parse_error"] = str(parse_err)
             state["llm_raw_snippet"] = ai_res[:300] if ai_res else ""
+
+        ai_data.setdefault("top_issues", [])
+        ai_data.setdefault("one_line_summary", "")
+        ai_data.setdefault("categorize", {})
+        ai_data.setdefault("llm_review", {})
+        ai_data["top_issues"] = [
+            issue for issue in ai_data.get("top_issues", [])
+            if not issue_looks_false_positive(issue, cwd)
+        ]
 
         state["report_started_at"] = now_iso()
         agent.save_state(state)

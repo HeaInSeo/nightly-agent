@@ -29,6 +29,9 @@ na stop                           # systemd 타이머 비활성화
 na scan                           # scan_paths 탐색 → 대화형 프로젝트 등록
 na add https://github.com/org/repo  # GitHub 저장소 클론 + 자동 등록
 na config                         # GitHub 토큰/저장소 및 clone_roots 설정
+na model                          # 현재 모델/설치된 Ollama 모델 조회
+na model qwen3.6:27b              # 설치된 모델 중 하나로 변경
+na model tune qwen3.6-nightly     # num_ctx/num_predict를 줄인 배치용 alias 생성
 ```
 
 ## 수동 실행
@@ -63,6 +66,12 @@ na config   # GitHub 토큰/저장소 및 clone_roots 대화형 설정
 | `llm.api_base_url` | 현재는 Ollama 엔드포인트만 지원 (`http://localhost:11434/v1`) |
 | `llm.model_name` | 사용할 모델명 |
 | `llm.api_key` | API 키 (Ollama는 빈 문자열) |
+| `llm.timeout_seconds` | LLM 요청 타임아웃 초 |
+| `llm.reasoning_effort` | Ollama OpenAI 호환 reasoning 제어 (`none`, `low`, `medium`, `high`) |
+| `llm.disable_thinking` | Qwen thinking 모델에 `/no_think` 시스템 지시 추가 |
+| `llm.review_max_tokens` | Phase 1 리뷰 응답 최대 토큰 수 |
+| `llm.continuity_max_tokens` | Phase 0.5 연속성 체크 응답 최대 토큰 수 |
+| `llm.fix_max_tokens` | Phase 2 패치 응답 최대 토큰 수 |
 | `github.enabled` | `true`일 때만 GitHub 리포트 저장소에 push |
 | `github.token` | GitHub Personal Access Token |
 | `github.reports_repo` | 리포트를 push할 GitHub 저장소 (`owner/repo`) |
@@ -83,6 +92,31 @@ na config   # GitHub 토큰/저장소 및 clone_roots 대화형 설정
 ```
 
 설정 변경 후 `sudo ./setup-ollama.sh` 재실행하면 타이머에 반영됩니다.
+
+### Qwen/Ollama 배치 튜닝 권장값
+
+Qwen thinking 모델은 Ollama에서 기본 thinking이 켜지고, 기본 생성 길이도 길게 잡히기 쉽습니다. 야간 배치 리뷰용으로는 아래 값을 권장합니다.
+
+```json
+"llm": {
+  "model_name": "qwen3.6:27b",
+  "timeout_seconds": 900,
+  "reasoning_effort": "none",
+  "disable_thinking": true,
+  "review_max_tokens": 1400,
+  "continuity_max_tokens": 600,
+  "fix_max_tokens": 2400
+}
+```
+
+Ollama 기본 모델 대신 배치용 alias를 만드는 것도 권장합니다.
+
+```bash
+na model tune qwen3.6-nightly
+na model qwen3.6-nightly
+```
+
+이 alias는 현재 기본값으로 `num_ctx 8192`, `num_predict 2048`를 사용합니다.
 
 ### `configs/projects.yaml`
 

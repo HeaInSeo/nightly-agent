@@ -10,12 +10,46 @@ import os
 import sys
 import json
 import datetime
+import re
 from agent_core import (
     AgentState, run_git, ask_llm, parse_args,
     load_issues_db, save_issues_db, make_issue_record,
 )
 
 SEVERITY_EMOJI = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
+
+def normalize_text(value):
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def canonical_issue_key(issue):
+    anchor = issue.get("anchor", {}) or {}
+    file_key = anchor.get("file", "") or ",".join(issue.get("target_files", []))
+    func_key = anchor.get("function", "")
+    title_key = normalize_text(issue.get("title", ""))
+    return f"{file_key}|{func_key}|{title_key}"
+
+
+def dedupe_issues(issues):
+    resolved = []
+    unresolved_by_key = {}
+
+    def sort_key(item):
+        return (
+            item.get("first_seen_date", ""),
+            item.get("first_seen_run", ""),
+            item.get("id", ""),
+        )
+
+    for issue in sorted(issues, key=sort_key):
+        if issue.get("status") == "resolved":
+            resolved.append(issue)
+            continue
+        key = canonical_issue_key(issue)
+        unresolved_by_key.setdefault(key, issue)
+
+    return resolved + list(unresolved_by_key.values())
 
 
 def pickaxe_changed(snippet, filepath, project_path, since_date):
@@ -71,7 +105,11 @@ def llm_recheck(issue, current_code, config):
         f"\"new_issue_why_dangerous\": \"\", \"new_issue_suggested_action\": \"\", "
         f"\"new_issue_snippet\": \"\"}}"
     )
-    raw = ask_llm(prompt, config)
+    raw = ask_llm(
+        prompt,
+        config,
+        max_tokens=config.get("llm", {}).get("continuity_max_tokens", 600),
+    )
     try:
         data = json.loads(raw.replace("```json", "").replace("```", "").strip())
         return data
@@ -164,23 +202,45 @@ def run_continuity_check(project_name, run_id, config):
 def merge_new_issues(project_name, run_issues):
     """Phase 1에서 발견한 신규 이슈를 issues_db에 병합한다.
     anchor 기반으로 중복 감지 후 진짜 신규만 추가한다."""
-    db = load_issues_db(project_name)
-    existing_snippets = {
-        iss.get("anchor", {}).get("snippet", "")[:80]
+    db = dedupe_issues(load_issues_db(project_name))
+    existing_keys = {
+        canonical_issue_key(iss)
         for iss in db
         if iss.get("status") != "resolved"
     }
 
     added = 0
     for iss in run_issues:
-        snippet_key = iss.get("anchor", {}).get("snippet", "")[:80]
-        if snippet_key and snippet_key in existing_snippets:
+        issue_key = canonical_issue_key(iss)
+        if issue_key in existing_keys:
             continue
         db.append(iss)
+        existing_keys.add(issue_key)
         added += 1
 
     save_issues_db(project_name, db)
     return added
+
+
+def reconcile_missing_issues(project_name, run_issues):
+    """이번 리뷰에서 재현되지 않은 open/recurring 이슈를 resolved로 정리한다."""
+    db = dedupe_issues(load_issues_db(project_name))
+    current_keys = {canonical_issue_key(iss) for iss in run_issues}
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    resolved_count = 0
+    for iss in db:
+        if iss.get("status") == "resolved":
+            continue
+        if canonical_issue_key(iss) in current_keys:
+            continue
+        iss["status"] = "resolved"
+        iss["resolved_date"] = today
+        iss["resolved_reason"] = "Not reproduced in latest review after prompt/filter cleanup."
+        resolved_count += 1
+
+    save_issues_db(project_name, db)
+    return resolved_count
 
 
 def main():

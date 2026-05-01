@@ -2,7 +2,14 @@
   "llm": {
     "api_base_url": "http://localhost:11434/v1",
     "model_name": "qwen3.6:27b",
-    "api_key": ""
+    "api_key": "",
+    "timeout_seconds": 900,
+    "temperature": 0,
+    "reasoning_effort": "none",
+    "disable_thinking": true,
+    "review_max_tokens": 480,
+    "continuity_max_tokens": 600,
+    "fix_max_tokens": 1200
   },
   "max_diff_lines": 2000,
   "max_retries": 3,

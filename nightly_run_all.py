@@ -4,6 +4,7 @@ import time
 import datetime
 import argparse
 import subprocess
+import importlib.util
 import yaml
 from agent_core import AgentState, check_ollama, parse_hour
 
@@ -18,6 +19,13 @@ def run_phase(script, extra_args):
     출력은 캡처하지 않고 터미널/cron 로그로 흘려보낸다."""
     result = subprocess.run([sys.executable, script] + extra_args)
     return result.returncode
+
+
+def load_continuity_module():
+    spec = importlib.util.spec_from_file_location("issue_continuity", "0_issue_continuity.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 def fmt_elapsed(seconds):
     m, s = divmod(int(seconds), 60)
@@ -131,6 +139,7 @@ def main():
     start_time = time.time()
     failed_projects = []
     deadline_skipped = []
+    continuity_mod = load_continuity_module()
 
     for idx, proj in enumerate(projects):
         pname = proj.get("name")
@@ -159,27 +168,12 @@ def main():
                 ".nightly_agent", "runs", run_id, pname, "issues.json"
             )
             if os.path.exists(issues_file):
-                from agent_core import load_issues_db
                 import json as _json
-                from agent_core import save_issues_db
-                from agent_core import make_issue_record
                 with open(issues_file) as _f:
                     run_issues = _json.load(_f)
-                from agent_core import load_issues_db, save_issues_db
-                db = load_issues_db(pname)
-                existing_snippets = {
-                    iss.get("anchor", {}).get("snippet", "")[:80]
-                    for iss in db if iss.get("status") != "resolved"
-                }
-                added = 0
-                for iss in run_issues:
-                    snippet_key = iss.get("anchor", {}).get("snippet", "")[:80]
-                    if snippet_key and snippet_key in existing_snippets:
-                        continue
-                    db.append(iss)
-                    added += 1
-                save_issues_db(pname, db)
-                print(f"[{pname}] issues_db 업데이트: {added}개 신규 이슈 추가")
+                added = continuity_mod.merge_new_issues(pname, run_issues)
+                resolved = continuity_mod.reconcile_missing_issues(pname, run_issues)
+                print(f"[{pname}] issues_db 업데이트: {added}개 신규 이슈 추가, {resolved}개 정리")
 
         print(f"[{pname}] Running Phase 2 (Fix)...")
         rc2 = run_phase("2_nightly_fix_candidate.py", ["--project", pname, "--run-id", run_id])

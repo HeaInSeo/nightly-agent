@@ -4,6 +4,17 @@ Pay special attention to these heuristics:
 - {{ heuristics | join('\n- ') }}
 {% endif %}
 
+Use heuristics carefully:
+- Treat surrounding comments and design-rationale notes as primary evidence.
+- Do not report an issue if the current code explicitly explains why a suspicious pattern is intentional.
+- Prefer concrete behavioral regressions over speculative style or architecture concerns.
+
+{% if review_context %}
+[Current Code Context]
+{{ review_context }}
+
+{% endif %}
+
 [Diff]
 {{ diff_text }}
 

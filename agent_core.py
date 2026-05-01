@@ -84,23 +84,44 @@ def elapsed_seconds(started_at, finished_at):
         return None
     return round((end_dt - start_dt).total_seconds(), 3)
 
-def ask_llm(prompt, config):
+def ask_llm(prompt, config, max_tokens=None, reasoning_effort=None, disable_thinking=None, response_format=None):
     """OpenAI 호환 API로 LLM에 프롬프트를 전송하고 응답 문자열을 반환한다.
     Ollama, vLLM, TGI, SGLang 등 OpenAI 호환 엔진 모두 지원."""
     llm_conf = config.get("llm", {})
     base_url = llm_conf.get("api_base_url", "http://localhost:11434/v1").rstrip("/")
     model = llm_conf.get("model_name", "qwen3.6:27b")
     api_key = llm_conf.get("api_key", "") or "ollama"
+    timeout_seconds = llm_conf.get("timeout_seconds", 600)
     url = f"{base_url}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    if reasoning_effort is None:
+        reasoning_effort = llm_conf.get("reasoning_effort")
+    if disable_thinking is None:
+        disable_thinking = llm_conf.get("disable_thinking", False)
+    if max_tokens is None:
+        max_tokens = llm_conf.get("max_tokens")
+    temperature = llm_conf.get("temperature", 0.2)
+
+    messages = []
+    if disable_thinking or reasoning_effort == "none":
+        messages.append({"role": "system", "content": "/no_think"})
+    messages.append({"role": "user", "content": prompt})
+
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": False,
-        "temperature": 0.2,
+        "temperature": temperature,
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
+    if response_format is not None:
+        payload["response_format"] = response_format
     try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=600)
+        resp = requests.post(url, json=payload, headers=headers, timeout=timeout_seconds)
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
     except Exception as e:

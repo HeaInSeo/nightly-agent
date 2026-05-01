@@ -1,6 +1,8 @@
 import os
 import sys
 import json
+import re
+import subprocess
 from agent_core import AgentState, run_cmd, run_git, parse_args, ask_llm
 
 def cleanup_worktree(worktree_path, branch_name, cwd):
@@ -9,6 +11,14 @@ def cleanup_worktree(worktree_path, branch_name, cwd):
     run_git(["branch", "-D", branch_name], cwd=cwd)
 
 def extract_patch(ai_response):
+    try:
+        payload = json.loads(ai_response)
+        if isinstance(payload, dict):
+            patch = payload.get("patch", "")
+            if isinstance(patch, str):
+                return patch.strip() + ("\n" if patch.strip() else "")
+    except Exception:
+        pass
     lines = ai_response.splitlines()
     patch_lines = []
     in_patch = False
@@ -27,6 +37,157 @@ def extract_patch(ai_response):
 def summarize_test_output(stdout, stderr, limit=400):
     combined = "\n".join(part for part in [stdout, stderr] if part).strip()
     return combined[:limit]
+
+
+def run_git_capture_raw(args, cwd="."):
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    return result.stdout, result.stderr, result.returncode
+
+
+def load_anchor_context(issue, cwd, context_lines=60):
+    anchor = issue.get("anchor") or {}
+    rel_path = anchor.get("file")
+    if not rel_path:
+        return ""
+
+    abs_path = os.path.join(cwd, rel_path)
+    if not os.path.exists(abs_path):
+        return ""
+
+    try:
+        with open(abs_path, "r") as f:
+            lines = f.readlines()
+    except Exception:
+        return ""
+
+    func_name = anchor.get("function", "")
+    start_idx = 0
+    if func_name:
+        patterns = [
+            re.compile(rf"^\s*func\s+\([^)]*\)\s*{re.escape(func_name)}\b"),
+            re.compile(rf"^\s*func\s+{re.escape(func_name)}\b"),
+        ]
+        for idx, line in enumerate(lines):
+            if any(p.search(line) for p in patterns):
+                start_idx = idx
+                break
+
+    end_idx = min(len(lines), start_idx + context_lines)
+    excerpt = "".join(lines[start_idx:end_idx]).rstrip()
+    return f"File: {rel_path}\nExcerpt:\n{excerpt}" if excerpt else ""
+
+
+def looks_like_unified_patch(text):
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    return (
+        "diff --git " in stripped and
+        "--- a/" in stripped and
+        "+++ b/" in stripped and
+        "@@" in stripped
+    )
+
+
+def find_go_function_bounds(lines, func_name):
+    start_idx = None
+    header_pattern = re.compile(rf"^\s*func\s+(?:\([^)]*\)\s*)?{re.escape(func_name)}\b")
+    for idx, line in enumerate(lines):
+        if header_pattern.search(line):
+            start_idx = idx
+            break
+    if start_idx is None:
+        return None, None
+
+    brace_depth = 0
+    saw_open = False
+    for idx in range(start_idx, len(lines)):
+        brace_depth += lines[idx].count("{")
+        if "{" in lines[idx]:
+            saw_open = True
+        brace_depth -= lines[idx].count("}")
+        if saw_open and brace_depth == 0:
+            return start_idx, idx + 1
+    return None, None
+
+
+def build_function_edit_prompt(issue, current_function, feedback_log):
+    return (
+        "Update the following function to address the issue.\n\n"
+        f"Issue JSON:\n{json.dumps(issue, ensure_ascii=False)}\n\n"
+        f"Previous attempt feedback:\n{feedback_log}\n\n"
+        "Return raw JSON only with keys replacement and summary.\n"
+        "- replacement must contain the full updated function source code only.\n"
+        "- Keep the same function name and signature unless the issue requires a minimal change.\n"
+        "- Preserve compilability. Do not invent APIs or change return types.\n"
+        "- If previous feedback shows build errors, correct those exact errors before anything else.\n"
+        "- If the current code already has comments or logic that justify the behavior, prefer an empty replacement.\n"
+        "- Do not use markdown fences.\n"
+        "- If no safe fix is possible, return an empty replacement and explain why in summary.\n\n"
+        f"Current function:\n{current_function}"
+    )
+
+
+def try_function_replacement(issue, worktree_path, config, feedback_log):
+    anchor = issue.get("anchor") or {}
+    rel_path = anchor.get("file")
+    func_name = anchor.get("function")
+    if not rel_path or not func_name or not rel_path.endswith(".go"):
+        return None, "function_replacement_not_applicable"
+
+    abs_path = os.path.join(worktree_path, rel_path)
+    if not os.path.exists(abs_path):
+        return None, f"target file not found: {rel_path}"
+
+    with open(abs_path, "r") as f:
+        lines = f.readlines()
+
+    start_idx, end_idx = find_go_function_bounds(lines, func_name)
+    if start_idx is None or end_idx is None:
+        return None, f"target function not found: {func_name}"
+
+    current_function = "".join(lines[start_idx:end_idx]).rstrip()
+    prompt = build_function_edit_prompt(issue, current_function, feedback_log)
+    ai_response = ask_llm(
+        prompt,
+        config,
+        max_tokens=config.get("llm", {}).get("fix_max_tokens", 1200),
+        response_format={"type": "json_object"},
+    )
+
+    try:
+        payload = json.loads(ai_response)
+    except Exception as exc:
+        return None, f"function replacement parse failed: {exc}"
+
+    replacement = (payload.get("replacement") or "").strip()
+    if not replacement:
+        return None, f"unsafe_no_fix: {payload.get('summary', 'empty replacement')}"
+    if not replacement.startswith("func "):
+        return None, "replacement did not contain a full Go function"
+    if replacement.strip() == current_function.strip():
+        return None, "unsafe_no_fix: replacement was identical to current function"
+
+    new_lines = list(lines)
+    replacement_lines = [line + "\n" for line in replacement.splitlines()]
+    if replacement_lines and replacement_lines[-1] != "\n":
+        pass
+    new_lines[start_idx:end_idx] = replacement_lines
+
+    with open(abs_path, "w") as f:
+        f.writelines(new_lines)
+
+    run_cmd(f"gofmt -w {rel_path}", cwd=worktree_path)
+    diff_out, diff_err, diff_code = run_git_capture_raw(["diff", "--", rel_path], cwd=worktree_path)
+    if diff_code != 0 or not diff_out.strip():
+        return None, f"no diff generated after replacement: {diff_err or payload.get('summary', '')}"
+    return diff_out, ""
 
 def main():
     args = parse_args()
@@ -88,20 +249,64 @@ def main():
         feedback_log = "Initial attempt"
         target_issue = issues[0]
         final_best_patch = None
+        last_failed_patch = None
+        last_failed_test_summary = None
 
         for attempt in range(1, max_retries + 1):
             state["attempt_count"] = attempt
             agent.save_state(state)
 
-            prompt = (
-                f"Fix the following issue by generating a unified git patch.\n\n"
-                f"Issue:\n{json.dumps(target_issue)}\n\n"
-                f"Feedback from previous attempt:\n{feedback_log}\n\n"
-                f"Please output ONLY the unified patch inside a ```diff block."
+            candidate_patch, function_feedback = try_function_replacement(
+                target_issue,
+                worktree_path,
+                config,
+                feedback_log,
             )
+            if candidate_patch is None:
+                run_git(["reset", "--hard", "HEAD"], cwd=worktree_path)
+                run_git(["clean", "-fd"], cwd=worktree_path)
 
-            ai_response = ask_llm(prompt, config)
-            candidate_patch = extract_patch(ai_response)
+                if function_feedback.startswith("unsafe_no_fix:"):
+                    state["status_p2_fix"] = "skipped"
+                    state["fix_note"] = function_feedback
+                    agent.save_state(state)
+                    return
+
+                anchor_context = load_anchor_context(target_issue, worktree_path)
+                prompt = (
+                    "Fix the following issue by generating a minimal unified git patch.\n\n"
+                    f"Issue JSON:\n{json.dumps(target_issue, ensure_ascii=False)}\n\n"
+                    f"Current code context:\n{anchor_context or 'N/A'}\n\n"
+                    f"Feedback from previous attempt:\n{feedback_log}\n\n"
+                    f"Function replacement attempt feedback:\n{function_feedback}\n\n"
+                    "Rules:\n"
+                    "- Modify only the files listed in target_files.\n"
+                    "- Return raw JSON only with keys patch and summary.\n"
+                    "- patch must be a complete unified diff beginning with diff --git and containing at least one @@ hunk.\n"
+                    "- Use the real current code context. Do not invent line numbers or fake index hashes.\n"
+                    "- If the issue is not safely fixable from the provided context, return an empty patch and explain why in summary.\n"
+                    "- Do not use markdown fences.\n"
+                    "- Keep summary under 120 characters.\n"
+                )
+
+                ai_response = ask_llm(
+                    prompt,
+                    config,
+                    max_tokens=config.get("llm", {}).get("fix_max_tokens", 1200),
+                    response_format={"type": "json_object"},
+                )
+                candidate_patch = extract_patch(ai_response)
+
+                if not looks_like_unified_patch(candidate_patch):
+                    feedback_log = (
+                        "Response did not contain a complete unified patch.\n"
+                        f"Raw response:\n{ai_response[:1200]}\n\n"
+                        "Return valid JSON with a complete patch string or an empty patch when unsafe."
+                    )
+                    continue
+            else:
+                run_git(["reset", "--hard", "HEAD"], cwd=worktree_path)
+                run_git(["clean", "-fd"], cwd=worktree_path)
 
             patch_path = os.path.join(agent.get_run_dir(), f"candidate_{attempt}.patch")
             with open(patch_path, "w") as f:
@@ -143,8 +348,20 @@ def main():
                     break
                 else:
                     # baseline은 green이었는데 패치 후 red → 진짜 실패
+                    current_test_summary = summarize_test_output(test_out, test_err, limit=1200)
+                    if candidate_patch == last_failed_patch or current_test_summary == last_failed_test_summary:
+                        state["status_p2_fix"] = "skipped"
+                        state["fix_note"] = (
+                            "no_safe_patch: repeated fix attempts produced the same failing result. "
+                            "The reviewed issue may be non-actionable or a false positive."
+                        )
+                        agent.save_state(state)
+                        return
+
+                    last_failed_patch = candidate_patch
+                    last_failed_test_summary = current_test_summary
                     feedback_log = (
-                        f"Patch applied but {test_cmd} failed. Error:\n{test_err}\nPlease fix it."
+                        f"Patch applied but {test_cmd} failed. Error:\n{current_test_summary}\nPlease fix it."
                     )
                     run_git(["reset", "--hard", "HEAD"], cwd=worktree_path)
                     run_git(["clean", "-fd"], cwd=worktree_path)

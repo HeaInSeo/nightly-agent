@@ -7,6 +7,9 @@
   na scan               scan_paths 탐색 → 대화형 프로젝트 등록
   na add <GitHub URL>   GitHub 저장소 클론 후 자동 등록
   na config             GitHub 저장소/토큰 및 clone_roots 설정
+  na model              현재 모델과 설치된 Ollama 모델 조회
+  na model <name>       현재 LLM 모델 변경 (설치된 Ollama 모델만 허용)
+  na model tune <alias> [base_model]  배치용 Ollama alias 생성
 """
 import os
 import re
@@ -14,6 +17,7 @@ import sys
 import json
 import subprocess
 import yaml
+import requests
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 PROJECTS_FILE = os.path.join(os.path.dirname(__file__), "configs", "projects.yaml")
@@ -279,6 +283,7 @@ def cmd_scan():
 
 def cmd_config():
     cfg = load_config()
+    llm = cfg.get("llm", {})
     gh = cfg.get("github", {})
 
     print("\nGitHub 설정")
@@ -295,6 +300,42 @@ def cmd_config():
         gh["token"] = token
     cfg["github"] = gh
 
+    print("\nLLM 설정")
+    print("--------")
+    current_model = llm.get("model_name", "")
+    current_timeout = llm.get("timeout_seconds", 900)
+    current_reasoning = llm.get("reasoning_effort", "none")
+    current_disable_thinking = llm.get("disable_thinking", True)
+    current_review_max = llm.get("review_max_tokens", 1400)
+    current_continuity_max = llm.get("continuity_max_tokens", 600)
+    current_fix_max = llm.get("fix_max_tokens", 2400)
+
+    model_name = input(f"모델명 [{current_model or 'qwen3.6:27b'}]: ").strip()
+    timeout_value = input(f"요청 타임아웃 초 [{current_timeout}]: ").strip()
+    reasoning = input(f"reasoning_effort [{current_reasoning}]: ").strip()
+    disable_thinking = input(
+        f"thinking 비활성화(true/false) [{'true' if current_disable_thinking else 'false'}]: "
+    ).strip().lower()
+    review_max = input(f"리뷰 max_tokens [{current_review_max}]: ").strip()
+    continuity_max = input(f"연속성 체크 max_tokens [{current_continuity_max}]: ").strip()
+    fix_max = input(f"패치 생성 max_tokens [{current_fix_max}]: ").strip()
+
+    if model_name:
+        llm["model_name"] = model_name
+    if timeout_value:
+        llm["timeout_seconds"] = int(timeout_value)
+    if reasoning:
+        llm["reasoning_effort"] = reasoning
+    if disable_thinking in ("true", "false"):
+        llm["disable_thinking"] = (disable_thinking == "true")
+    if review_max:
+        llm["review_max_tokens"] = int(review_max)
+    if continuity_max:
+        llm["continuity_max_tokens"] = int(continuity_max)
+    if fix_max:
+        llm["fix_max_tokens"] = int(fix_max)
+    cfg["llm"] = llm
+
     # clone_roots 설정
     print("\nclone_roots 설정 (타입별 클론 기본 경로, Enter로 현재값 유지)")
     print("------------------------------------------------------------------")
@@ -308,6 +349,106 @@ def cmd_config():
 
     save_config(cfg)
     print("\n✅ config.json 업데이트 완료")
+
+
+def _fetch_installed_ollama_models(cfg):
+    llm = cfg.get("llm", {})
+    base_url = llm.get("api_base_url", "http://localhost:11434/v1").rstrip("/")
+    root_url = base_url[:-3] if base_url.endswith("/v1") else base_url
+    resp = requests.get(f"{root_url}/api/tags", timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+
+
+def _resolve_installed_model_name(requested_name, installed_models):
+    """Ollama의 :latest suffix를 감안해 실제 설치된 모델명을 찾는다."""
+    if requested_name in installed_models:
+        return requested_name
+    latest_name = f"{requested_name}:latest"
+    if latest_name in installed_models:
+        return latest_name
+    return None
+
+
+def cmd_model(argv):
+    cfg = load_config()
+    llm = cfg.setdefault("llm", {})
+    current = llm.get("model_name", "")
+
+    try:
+        installed = _fetch_installed_ollama_models(cfg)
+    except Exception as e:
+        print(f"Ollama 모델 조회 실패: {e}")
+        sys.exit(1)
+
+    if len(argv) >= 1 and argv[0] == "tune":
+        if len(argv) < 2:
+            print("사용법: na model tune <alias> [base_model]")
+            sys.exit(1)
+        alias = argv[1].strip()
+        if not alias:
+            print("alias가 비어 있습니다.")
+            sys.exit(1)
+        base_model = argv[2].strip() if len(argv) >= 3 else (current or "qwen3.6:27b")
+        resolved_base_model = _resolve_installed_model_name(base_model, installed)
+        if not resolved_base_model:
+            print(f"설치되지 않은 base_model입니다: {base_model}")
+            sys.exit(1)
+
+        modelfile = "\n".join([
+            f"FROM {resolved_base_model}",
+            "PARAMETER num_ctx 8192",
+            "PARAMETER num_predict 2048",
+            ""
+        ])
+        os.makedirs(os.path.join(os.path.dirname(__file__), ".nightly_agent", "modelfiles"), exist_ok=True)
+        modelfile_path = os.path.join(
+            os.path.dirname(__file__), ".nightly_agent", "modelfiles", f"{alias}.Modelfile"
+        )
+        with open(modelfile_path, "w") as f:
+            f.write(modelfile)
+
+        print(f"Modelfile 작성 완료: {modelfile_path}")
+        result = subprocess.run(["ollama", "create", alias, "-f", modelfile_path])
+        if result.returncode != 0:
+            print("ollama create 실패.")
+            sys.exit(1)
+        print(f"Ollama alias 생성 완료: {alias}")
+        print("필요하면 다음 명령으로 현재 모델을 전환하세요:")
+        print(f"  na model {alias}")
+        return
+
+    if len(argv) == 0:
+        print(f"현재 모델: {current or '(미설정)'}")
+        if installed:
+            print("설치된 Ollama 모델:")
+            for name in installed:
+                marker = " (current)" if name == current else ""
+                print(f"  - {name}{marker}")
+        else:
+            print("설치된 Ollama 모델이 없습니다.")
+        return
+
+    model_name = argv[0].strip()
+    if not model_name:
+        print("모델명이 비어 있습니다.")
+        sys.exit(1)
+    resolved_model_name = _resolve_installed_model_name(model_name, installed)
+    if not resolved_model_name:
+        print(f"설치되지 않은 모델입니다: {model_name}")
+        print("먼저 Ollama에 모델을 설치한 뒤 다시 시도하세요.")
+        print("예: ollama pull <model>")
+        if installed:
+            print("현재 설치된 모델:")
+            for name in installed:
+                print(f"  - {name}")
+        sys.exit(1)
+
+    llm["model_name"] = resolved_model_name
+    cfg["llm"] = llm
+    save_config(cfg)
+    print(f"LLM 모델 변경 완료: {resolved_model_name}")
 
 
 def main():
@@ -329,6 +470,8 @@ def main():
         cmd_add(sys.argv[2])
     elif cmd == "config":
         cmd_config()
+    elif cmd == "model":
+        cmd_model(sys.argv[2:])
     else:
         print(f"알 수 없는 명령: {cmd}")
         print(__doc__)
