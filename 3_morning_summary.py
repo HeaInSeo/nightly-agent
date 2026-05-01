@@ -56,6 +56,8 @@ def main():
             "llm_parse_ok": st.get("llm_parse_ok", True),
             "llm_parse_error": st.get("llm_parse_error", ""),
             "error_message": st.get("error_message", ""),
+            "review_level": st.get("review_level"),
+            "false_positive_cleanup_count": st.get("false_positive_cleanup_count", 0),
             "review_started_at": st.get("review_started_at"),
             "review_finished_at": st.get("review_finished_at"),
             "review_duration_sec": st.get("review_duration_sec"),

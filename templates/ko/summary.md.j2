@@ -30,6 +30,10 @@
 
 **한줄 평가**: {{ c.one_line_summary }}
 {% endif %}
+{% if c.false_positive_cleanup_count %}
+
+**정리된 오탐 이슈**: {{ c.false_positive_cleanup_count }}개
+{% endif %}
 
 ### 빌드 / 테스트 / 린트
 {% if c.test_results %}

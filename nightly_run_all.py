@@ -169,11 +169,21 @@ def main():
             )
             if os.path.exists(issues_file):
                 import json as _json
+                state_file = os.path.join(".nightly_agent", "runs", run_id, pname, "state.json")
                 with open(issues_file) as _f:
                     run_issues = _json.load(_f)
                 added = continuity_mod.merge_new_issues(pname, run_issues)
-                resolved = continuity_mod.reconcile_missing_issues(pname, run_issues)
-                print(f"[{pname}] issues_db 업데이트: {added}개 신규 이슈 추가, {resolved}개 정리")
+                false_positive_cleaned = continuity_mod.reconcile_missing_issues(pname, run_issues)
+                if os.path.exists(state_file):
+                    with open(state_file, "r") as sf:
+                        st = _json.load(sf)
+                    st["false_positive_cleanup_count"] = false_positive_cleaned
+                    with open(state_file, "w") as sf:
+                        _json.dump(st, sf, indent=4)
+                print(
+                    f"[{pname}] issues_db 업데이트: {added}개 신규 이슈 추가, "
+                    f"{false_positive_cleaned}개 false positive 정리"
+                )
 
         print(f"[{pname}] Running Phase 2 (Fix)...")
         rc2 = run_phase("2_nightly_fix_candidate.py", ["--project", pname, "--run-id", run_id])

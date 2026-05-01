@@ -5,6 +5,7 @@
   2. 변경 없음 → recurring 확정 (LLM 불필요)
   3. 변경 있음 → LLM 재판단 (git 증거 + LLM 둘 다 충족해야 resolved)
   4. LLM이 잘못된 픽스로 판단 → 파생 이슈 생성
+  5. 최신 리뷰에서 더 이상 재현되지 않는 과거 오탐은 false_positive로 정리
 """
 import os
 import sys
@@ -43,13 +44,30 @@ def dedupe_issues(issues):
         )
 
     for issue in sorted(issues, key=sort_key):
-        if issue.get("status") == "resolved":
+        if issue.get("status") in ("resolved", "false_positive"):
             resolved.append(issue)
             continue
         key = canonical_issue_key(issue)
         unresolved_by_key.setdefault(key, issue)
 
     return resolved + list(unresolved_by_key.values())
+
+
+def migrate_false_positive_statuses(issues):
+    migrated = 0
+    for issue in issues:
+        if issue.get("status") != "resolved":
+            continue
+        reason = issue.get("resolved_reason", "")
+        if reason != "Not reproduced in latest review after prompt/filter cleanup.":
+            continue
+        issue["status"] = "false_positive"
+        issue["false_positive_date"] = issue.get("resolved_date") or issue.get("last_seen_date")
+        issue["false_positive_reason"] = reason
+        issue.pop("resolved_date", None)
+        issue.pop("resolved_reason", None)
+        migrated += 1
+    return migrated
 
 
 def pickaxe_changed(snippet, filepath, project_path, since_date):
@@ -127,10 +145,13 @@ def run_continuity_check(project_name, run_id, config):
     issues = load_issues_db(project_name)
     if not issues:
         return []
+    migrated = migrate_false_positive_statuses(issues)
+    if migrated:
+        save_issues_db(project_name, issues)
 
     new_derived = []
     for iss in issues:
-        if iss.get("status") in ("resolved",):
+        if iss.get("status") in ("resolved", "false_positive"):
             continue
 
         anchor = iss.get("anchor", {})
@@ -203,10 +224,11 @@ def merge_new_issues(project_name, run_issues):
     """Phase 1에서 발견한 신규 이슈를 issues_db에 병합한다.
     anchor 기반으로 중복 감지 후 진짜 신규만 추가한다."""
     db = dedupe_issues(load_issues_db(project_name))
+    migrate_false_positive_statuses(db)
     existing_keys = {
         canonical_issue_key(iss)
         for iss in db
-        if iss.get("status") != "resolved"
+        if iss.get("status") not in ("resolved", "false_positive")
     }
 
     added = 0
@@ -223,24 +245,25 @@ def merge_new_issues(project_name, run_issues):
 
 
 def reconcile_missing_issues(project_name, run_issues):
-    """이번 리뷰에서 재현되지 않은 open/recurring 이슈를 resolved로 정리한다."""
+    """이번 리뷰에서 재현되지 않은 open/recurring 이슈를 false_positive로 정리한다."""
     db = dedupe_issues(load_issues_db(project_name))
+    migrate_false_positive_statuses(db)
     current_keys = {canonical_issue_key(iss) for iss in run_issues}
     today = datetime.datetime.now().strftime("%Y-%m-%d")
 
-    resolved_count = 0
+    false_positive_count = 0
     for iss in db:
-        if iss.get("status") == "resolved":
+        if iss.get("status") in ("resolved", "false_positive"):
             continue
         if canonical_issue_key(iss) in current_keys:
             continue
-        iss["status"] = "resolved"
-        iss["resolved_date"] = today
-        iss["resolved_reason"] = "Not reproduced in latest review after prompt/filter cleanup."
-        resolved_count += 1
+        iss["status"] = "false_positive"
+        iss["false_positive_date"] = today
+        iss["false_positive_reason"] = "Not reproduced in latest review after prompt/filter cleanup."
+        false_positive_count += 1
 
     save_issues_db(project_name, db)
-    return resolved_count
+    return false_positive_count
 
 
 def main():

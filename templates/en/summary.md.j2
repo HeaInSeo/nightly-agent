@@ -30,6 +30,10 @@
 
 **Summary**: {{ c.one_line_summary }}
 {% endif %}
+{% if c.false_positive_cleanup_count %}
+
+**False positives cleaned up**: {{ c.false_positive_cleanup_count }}
+{% endif %}
 
 ### Build / Test / Lint
 {% if c.test_results %}

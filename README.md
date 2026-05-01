@@ -188,7 +188,7 @@ projects:
 
 ```
 .nightly_agent/
-  issues_db/{project}.json          ← 누적 이슈 DB (UUID + anchor)
+  issues_db/{project}.json          ← 누적 이슈 DB (open/recurring/resolved/false_positive)
   runs/{run_id}/{project}/
     state.json                      ← 파이프라인 상태
     review_report.md                ← LLM 코드 리뷰
