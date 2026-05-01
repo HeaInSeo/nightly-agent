@@ -29,6 +29,8 @@ na stop                           # systemd 타이머 비활성화
 na scan                           # scan_paths 탐색 → 대화형 프로젝트 등록
 na add https://github.com/org/repo  # GitHub 저장소 클론 + 자동 등록
 na config                         # GitHub 토큰/저장소 및 clone_roots 설정
+na review-level                   # 현재 리뷰 레벨 설정 조회
+na review-level 2 --max-level 3   # 기본 리뷰 레벨 변경
 na model                          # 현재 모델/설치된 Ollama 모델 조회
 na model qwen3.6:27b              # 설치된 모델 중 하나로 변경
 na model tune qwen3.6-nightly     # num_ctx/num_predict를 줄인 배치용 alias 생성
@@ -78,6 +80,10 @@ na config   # GitHub 토큰/저장소 및 clone_roots 대화형 설정
 | `scan_paths` | `na scan`이 탐색할 로컬 디렉토리 목록 |
 | `clone_roots` | `na add` 시 타입별 클론 기본 경로 |
 | `max_diff_lines` | 이 줄 수 초과 diff는 리뷰 스킵 |
+| `review.level` | 기본 리뷰 깊이 레벨 (`1` 보수적, `3` 넓게 탐지) |
+| `review.max_level` | 자동 승급 시 최대 레벨 |
+| `review.auto_promote` | 최근 clean run이 누적되면 레벨 자동 승급 |
+| `phase2.min_severity` | 자동 패치를 시도할 최소 severity (`high` 권장) |
 | `language` | 리포트 언어 (`ko` / `en`) |
 | `cron_hour` | 실행 시각 (예: `"2am"`, `2`) |
 | `deadline_hour` | 이 시각 이후 남은 프로젝트 스킵 (예: `"6am"`, `null`이면 마감 없음) |
@@ -106,6 +112,19 @@ Qwen thinking 모델은 Ollama에서 기본 thinking이 켜지고, 기본 생성
   "review_max_tokens": 1400,
   "continuity_max_tokens": 600,
   "fix_max_tokens": 2400
+},
+"review": {
+  "level": 1,
+  "max_level": 3,
+  "auto_promote": true
+},
+"phase2": {
+  "min_severity": "high",
+  "min_severity_by_level": {
+    "1": "high",
+    "2": "high",
+    "3": "medium"
+  }
 }
 ```
 
@@ -117,6 +136,33 @@ na model qwen3.6-nightly
 ```
 
 이 alias는 현재 기본값으로 `num_ctx 8192`, `num_predict 2048`를 사용합니다.
+
+### Phase 2 자동 패치 기준
+
+Phase 2는 이제 더 보수적으로 동작합니다. 기본적으로 아래 조건을 만족하는 이슈만 자동 패치 대상으로 삼습니다.
+
+- severity가 `high` 이상
+- 대상 파일이 하나로 좁혀짐
+- `anchor.file`과 `anchor.function`이 모두 있음
+- 이슈 설명이 추측성 표현(`가능성`, `may`, `potential` 등) 위주가 아님
+- `suggested_action`이 실제 수정 행동을 가리키는 구체 문장임
+
+조건을 만족하지 않으면 `status_p2_fix: skipped`로 종료되고 `fix_note`에 이유가 남습니다.
+
+### 리뷰 레벨
+
+리뷰는 이제 레벨 기반으로 동작합니다.
+
+- `level 1`: 가장 보수적. 명백한 버그 위주, false positive 억제 강함
+- `level 2`: 균형형. 명백한 버그 + 근거 있는 중간 수준 위험 일부 포함
+- `level 3`: 탐색형. medium 위험까지 넓게 탐지
+
+`review.auto_promote: true`이면 최근 clean run이 누적될수록 자동으로 레벨이 올라갑니다.
+
+- 최근 clean run 2회 이상: `+1`
+- 최근 clean run 4회 이상: `+2`
+
+최종 레벨은 `review.max_level`을 넘지 않습니다. 각 run의 실제 적용 레벨은 `state.json`과 `review_report.md`에 기록됩니다.
 
 ### `configs/projects.yaml`
 

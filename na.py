@@ -10,6 +10,8 @@
   na model              현재 모델과 설치된 Ollama 모델 조회
   na model <name>       현재 LLM 모델 변경 (설치된 Ollama 모델만 허용)
   na model tune <alias> [base_model]  배치용 Ollama alias 생성
+  na review-level       현재 리뷰 레벨 설정 조회
+  na review-level <1|2|3> [--auto-promote true|false] [--max-level N]
 """
 import os
 import re
@@ -285,6 +287,8 @@ def cmd_config():
     cfg = load_config()
     llm = cfg.get("llm", {})
     gh = cfg.get("github", {})
+    review = cfg.get("review", {})
+    phase2 = cfg.get("phase2", {})
 
     print("\nGitHub 설정")
     print("-----------")
@@ -336,6 +340,33 @@ def cmd_config():
         llm["fix_max_tokens"] = int(fix_max)
     cfg["llm"] = llm
 
+    print("\n리뷰 레벨 설정")
+    print("--------------")
+    current_review_level = review.get("level", 1)
+    current_max_level = review.get("max_level", 3)
+    current_auto_promote = review.get("auto_promote", True)
+    current_phase2_min = phase2.get("min_severity", "high")
+
+    review_level = input(f"기본 리뷰 레벨 [{current_review_level}]: ").strip()
+    review_max_level = input(f"최대 리뷰 레벨 [{current_max_level}]: ").strip()
+    auto_promote = input(
+        f"자동 승급(true/false) [{'true' if current_auto_promote else 'false'}]: "
+    ).strip().lower()
+    phase2_min = input(f"Phase2 최소 severity [{current_phase2_min}]: ").strip().lower()
+
+    if review_level:
+        review["level"] = int(review_level)
+    if review_max_level:
+        review["max_level"] = int(review_max_level)
+    if auto_promote in ("true", "false"):
+        review["auto_promote"] = (auto_promote == "true")
+    cfg["review"] = review
+
+    if phase2_min:
+        phase2["min_severity"] = phase2_min
+    phase2.setdefault("min_severity_by_level", {"1": "high", "2": "high", "3": "medium"})
+    cfg["phase2"] = phase2
+
     # clone_roots 설정
     print("\nclone_roots 설정 (타입별 클론 기본 경로, Enter로 현재값 유지)")
     print("------------------------------------------------------------------")
@@ -349,6 +380,54 @@ def cmd_config():
 
     save_config(cfg)
     print("\n✅ config.json 업데이트 완료")
+
+
+def cmd_review_level(argv):
+    cfg = load_config()
+    review = cfg.setdefault("review", {})
+    phase2 = cfg.setdefault("phase2", {})
+
+    if not argv:
+        print(f"기본 리뷰 레벨: {review.get('level', 1)}")
+        print(f"최대 리뷰 레벨: {review.get('max_level', 3)}")
+        print(f"자동 승급: {'true' if review.get('auto_promote', True) else 'false'}")
+        print(f"Phase2 최소 severity: {phase2.get('min_severity', 'high')}")
+        print(f"레벨별 severity: {phase2.get('min_severity_by_level', {'1': 'high', '2': 'high', '3': 'medium'})}")
+        return
+
+    first = argv[0].strip()
+    if first not in {"1", "2", "3"}:
+        print("사용법: na review-level <1|2|3> [--auto-promote true|false] [--max-level N]")
+        sys.exit(1)
+
+    review["level"] = int(first)
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token == "--auto-promote" and i + 1 < len(argv):
+            value = argv[i + 1].strip().lower()
+            if value not in ("true", "false"):
+                print("--auto-promote 값은 true 또는 false 여야 합니다.")
+                sys.exit(1)
+            review["auto_promote"] = (value == "true")
+            i += 2
+            continue
+        if token == "--max-level" and i + 1 < len(argv):
+            review["max_level"] = int(argv[i + 1])
+            i += 2
+            continue
+        print(f"알 수 없는 옵션: {token}")
+        sys.exit(1)
+
+    phase2.setdefault("min_severity", "high")
+    phase2.setdefault("min_severity_by_level", {"1": "high", "2": "high", "3": "medium"})
+    cfg["review"] = review
+    cfg["phase2"] = phase2
+    save_config(cfg)
+    print("리뷰 레벨 설정 업데이트 완료")
+    print(f"  기본 레벨: {review.get('level', 1)}")
+    print(f"  최대 레벨: {review.get('max_level', 3)}")
+    print(f"  자동 승급: {'true' if review.get('auto_promote', True) else 'false'}")
 
 
 def _fetch_installed_ollama_models(cfg):
@@ -470,6 +549,8 @@ def main():
         cmd_add(sys.argv[2])
     elif cmd == "config":
         cmd_config()
+    elif cmd == "review-level":
+        cmd_review_level(sys.argv[2:])
     elif cmd == "model":
         cmd_model(sys.argv[2:])
     else:

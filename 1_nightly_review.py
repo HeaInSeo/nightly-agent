@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import glob
 from jinja2 import Environment, FileSystemLoader
 from agent_core import AgentState, run_cmd, parse_args, ask_llm, now_iso, elapsed_seconds
 
@@ -164,6 +165,76 @@ def issue_looks_false_positive(issue, cwd):
 
     return False
 
+
+def recent_project_states(project_name, current_run_id, limit=6):
+    pattern = os.path.join(".nightly_agent", "runs", "*", project_name, "state.json")
+    states = []
+    for path in sorted(glob.glob(pattern), reverse=True):
+        if f"/{current_run_id}/" in path:
+            continue
+        try:
+            with open(path, "r") as f:
+                states.append(json.load(f))
+        except Exception:
+            continue
+        if len(states) >= limit:
+            break
+    return states
+
+
+def resolve_review_level(agent, config):
+    review_conf = config.get("review", {})
+    base_level = int(review_conf.get("level", 1))
+    max_level = int(review_conf.get("max_level", 3))
+    auto_promote = review_conf.get("auto_promote", True)
+    level = max(1, min(base_level, max_level))
+
+    if not auto_promote:
+        return level
+
+    states = recent_project_states(agent.project_name, agent.run_id, limit=6)
+    clean_streak = 0
+    for state in states:
+        if state.get("status_p1_review") != "success":
+            break
+        issues_file = state.get("issues_file")
+        issues = None
+        if issues_file and os.path.exists(issues_file):
+            try:
+                with open(issues_file, "r") as f:
+                    issues = json.load(f)
+            except Exception:
+                issues = None
+        if issues is None or issues:
+            break
+        clean_streak += 1
+
+    if clean_streak >= 4:
+        level += 2
+    elif clean_streak >= 2:
+        level += 1
+    return min(level, max_level)
+
+
+def review_level_profile(level):
+    if level <= 1:
+        return {
+            "max_issues": 2,
+            "summary_chars": 80,
+            "strict_mode": True,
+        }
+    if level == 2:
+        return {
+            "max_issues": 3,
+            "summary_chars": 100,
+            "strict_mode": True,
+        }
+    return {
+        "max_issues": 5,
+        "summary_chars": 120,
+        "strict_mode": False,
+    }
+
 def main():
     args = parse_args()
     if not args.project:
@@ -214,6 +285,9 @@ def main():
 
         state["merge_base"] = merge_base
         state["base_branch"] = agent.project_context.get('base_branch')
+        review_level = resolve_review_level(agent, config)
+        level_profile = review_level_profile(review_level)
+        state["review_level"] = review_level
         
         env = Environment(loader=FileSystemLoader('.'))
 
@@ -230,6 +304,7 @@ def main():
             heuristics=agent.heuristics,
             diff_text=diff_text,
             review_context=review_context,
+            review_level=review_level,
         )
         
         lang = config.get("language", "ko")
@@ -250,15 +325,22 @@ def main():
         json_directive += (
             "\nReturn raw JSON only on a single line."
             "\nDo not use markdown fences."
-            "\nReturn at most 2 top_issues."
-            "\nKeep one_line_summary under 80 characters."
+            f"\nReturn at most {level_profile['max_issues']} top_issues."
+            f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
             "\nKeep each string field concise: 1 short sentence."
             "\nOmit fields that are not listed in the schema."
             "\nIf there is no meaningful issue, return an empty top_issues array."
-            "\nDo not report an issue when nearby comments or current code explicitly justify the behavior."
-            "\nTreat design-rationale comments as strong evidence unless the diff clearly breaks that contract."
-            "\nDo not invent concurrency bugs from heuristic suspicion alone."
         )
+        if level_profile["strict_mode"]:
+            json_directive += (
+                "\nDo not report an issue when nearby comments or current code explicitly justify the behavior."
+                "\nTreat design-rationale comments as strong evidence unless the diff clearly breaks that contract."
+                "\nDo not invent concurrency bugs from heuristic suspicion alone."
+            )
+        else:
+            json_directive += (
+                "\nPrefer concrete bugs first, but you may include medium-confidence risks if they are technically grounded."
+            )
         if lang == "ko":
             json_directive += "\nALL text inside the JSON values MUST be written in Korean."
         else:
@@ -308,6 +390,7 @@ def main():
                 diff_lines_count=diff_lines,
                 status_review="Degraded" if not llm_parse_ok else "Done",
                 status_fix="Pending",
+                review_level=state.get("review_level"),
                 review_started_at=state.get("review_started_at"),
                 review_finished_at=state.get("review_finished_at"),
                 review_duration_sec=state.get("review_duration_sec"),

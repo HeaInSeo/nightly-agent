@@ -50,6 +50,66 @@ def run_git_capture_raw(args, cwd="."):
     return result.stdout, result.stderr, result.returncode
 
 
+def severity_rank(value):
+    return {"low": 1, "medium": 2, "high": 3}.get((value or "").lower(), 0)
+
+
+def looks_speculative(text):
+    normalized = (text or "").lower()
+    speculative_markers = [
+        "가능성", "우려", "검증 필요", "권장", "추정", "명확하지", "might", "may", "could",
+        "possible", "potential", "needs verification", "unclear", "suspicion",
+    ]
+    return any(marker in normalized for marker in speculative_markers)
+
+
+def looks_concrete_action(text):
+    normalized = (text or "").lower()
+    concrete_markers = [
+        "add ", "use ", "check ", "handle ", "return ", "close ", "remove ", "restore ",
+        "wrap ", "set ", "pass ", "guard ", "validate ", "replace ",
+        "추가", "사용", "확인", "처리", "반환", "닫", "제거", "복원", "설정", "전달", "검증", "교체",
+    ]
+    return any(marker in normalized for marker in concrete_markers)
+
+
+def min_severity_for_level(level, config):
+    phase2_conf = config.get("phase2", {})
+    level_map = phase2_conf.get("min_severity_by_level", {})
+    return level_map.get(str(level)) or level_map.get(int(level)) or phase2_conf.get("min_severity", "high")
+
+
+def is_actionable_issue(issue, config, review_level):
+    fix_conf = config.get("phase2", {})
+    min_severity = min_severity_for_level(review_level, config)
+    if severity_rank(issue.get("severity")) < severity_rank(min_severity):
+        return False, f"severity_below_threshold:{min_severity}"
+
+    anchor = issue.get("anchor") or {}
+    target_files = issue.get("target_files") or []
+    if len(target_files) != 1:
+        return False, "requires_single_target_file"
+    if not anchor.get("file") or not anchor.get("function"):
+        return False, "missing_anchor_context"
+
+    description = " ".join([
+        issue.get("title", ""),
+        issue.get("what_is_wrong", ""),
+        issue.get("why_dangerous", ""),
+    ])
+    if looks_speculative(description):
+        return False, "issue_is_speculative"
+
+    action_text = issue.get("suggested_action", "")
+    if not looks_concrete_action(action_text):
+        return False, "suggested_action_not_concrete"
+
+    if review_level <= 1 and looks_speculative(action_text):
+        return False, "action_is_speculative"
+
+    return True, ""
+
+
 def load_anchor_context(issue, cwd, context_lines=60):
     anchor = issue.get("anchor") or {}
     rel_path = anchor.get("file")
@@ -208,6 +268,7 @@ def main():
 
         state["status_p2_fix"] = "running"
         agent.save_state(state)
+        review_level = int(state.get("review_level", config.get("review", {}).get("level", 1)))
 
         issues_file = state.get("issues_file")
         issues = []
@@ -217,6 +278,21 @@ def main():
 
         if not issues:
             state["status_p2_fix"] = "skipped"
+            agent.save_state(state)
+            return
+
+        actionable_issues = []
+        skipped_reasons = []
+        for issue in issues:
+            ok, reason = is_actionable_issue(issue, config, review_level)
+            if ok:
+                actionable_issues.append(issue)
+            else:
+                skipped_reasons.append(f"{issue.get('title', '')}: {reason}")
+
+        if not actionable_issues:
+            state["status_p2_fix"] = "skipped"
+            state["fix_note"] = "no_actionable_issue: " + "; ".join(skipped_reasons[:3])
             agent.save_state(state)
             return
 
@@ -247,7 +323,7 @@ def main():
 
         success = False
         feedback_log = "Initial attempt"
-        target_issue = issues[0]
+        target_issue = actionable_issues[0]
         final_best_patch = None
         last_failed_patch = None
         last_failed_test_summary = None
