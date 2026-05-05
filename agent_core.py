@@ -321,6 +321,27 @@ def make_issue_record(llm_issue, run_id, commit):
 
 
 ISSUES_DB_DIR = os.path.join(AGENT_DIR, "issues_db")
+LAST_REVIEWED_DIR = os.path.join(AGENT_DIR, "last_reviewed")
+
+
+def load_last_reviewed(project_name):
+    """프로젝트의 마지막 리뷰 완료 커밋을 반환한다. 없으면 빈 dict."""
+    path = os.path.join(LAST_REVIEWED_DIR, f"{project_name}.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_last_reviewed(project_name, commit, timestamp=None):
+    """리뷰 성공 후 다음 실행의 diff 기준점을 저장한다."""
+    os.makedirs(LAST_REVIEWED_DIR, exist_ok=True)
+    path = os.path.join(LAST_REVIEWED_DIR, f"{project_name}.json")
+    with open(path, "w") as f:
+        json.dump({
+            "last_reviewed_commit": commit,
+            "last_reviewed_at": timestamp or datetime.datetime.now().isoformat(timespec="seconds"),
+        }, f, indent=4)
 
 
 def load_issues_db(project_name):

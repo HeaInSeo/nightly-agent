@@ -124,7 +124,7 @@ cat > /tmp/nightly-agent.service << EOF
 [Unit]
 Description=Nightly Agent — 야간 코드 리뷰 파이프라인
 After=network-online.target ollama.service
-Wants=ollama.service
+Wants=network-online.target ollama.service
 
 [Service]
 Type=oneshot
@@ -134,6 +134,8 @@ ExecStart=$PYTHON $SCRIPT_DIR/nightly_run_all.py
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=nightly-agent
+TimeoutStartSec=8h
+Environment="PATH=/usr/local/go/bin:/home/$(whoami)/.dotnet:/home/$(whoami)/.dotnet/tools:/home/$(whoami)/go/bin:/usr/local/bin:/usr/bin:/bin"
 
 [Install]
 WantedBy=multi-user.target

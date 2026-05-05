@@ -259,7 +259,12 @@ def main():
     project_cwd = agent.project_context['path']
     worktree_path = os.path.abspath(os.path.join(agent.get_run_dir(), "sandbox_worktree"))
 
+    state = {}
     try:
+        if not os.path.isdir(project_cwd):
+            print(f"Error: project path does not exist: {project_cwd}", file=sys.stderr)
+            sys.exit(1)
+
         config = agent.config
         state = agent.load_state()
 

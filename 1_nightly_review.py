@@ -4,7 +4,7 @@ import json
 import re
 import glob
 from jinja2 import Environment, FileSystemLoader
-from agent_core import AgentState, run_cmd, parse_args, ask_llm, now_iso, elapsed_seconds
+from agent_core import AgentState, run_cmd, run_git, parse_args, ask_llm, now_iso, elapsed_seconds, load_last_reviewed, save_last_reviewed
 
 
 def collect_command_results(agent, cwd):
@@ -23,32 +23,50 @@ def collect_command_results(agent, cwd):
     return detailed_results
 
 def get_filtered_diff(agent, state, cwd):
-    base_branch = agent.project_context.get("base_branch", "main")
-    merge_base_out, err, code = run_cmd(f"git merge-base {base_branch} {state['target_commit']}", cwd=cwd)
-    if code != 0:
-        return "", "", f"Merge base failed. Make sure {base_branch} exists locally."
-    
-    merge_base = merge_base_out.strip()
-    
-    # Path filtering based on includes/excludes
+    # B방식: last_reviewed_commit이 있으면 그 이후부터만 diff
+    last_reviewed = load_last_reviewed(agent.project_name)
+    last_commit = last_reviewed.get("last_reviewed_commit")
+
+    if last_commit:
+        _, _, code = run_git(["cat-file", "-t", last_commit], cwd=cwd)
+        if code != 0:
+            last_commit = None  # 커밋이 사라졌으면 fallback
+
+    if last_commit:
+        base_ref = last_commit
+        base_mode = "last_reviewed"
+    else:
+        # 첫 실행 fallback: base_branch (없으면 HEAD~3)
+        base_branch = agent.project_context.get("base_branch", "HEAD~3")
+        merge_base_out, _, code = run_cmd(
+            f"git merge-base {base_branch} {state['target_commit']}", cwd=cwd
+        )
+        if code != 0:
+            return "", "", f"Merge base failed. Make sure {base_branch} exists locally."
+        base_ref = merge_base_out.strip()
+        base_mode = "base_branch_fallback"
+
+    state["diff_base_mode"] = base_mode
+    state["diff_base_ref"] = base_ref
+
     review_conf = agent.project_context.get("review", {})
     includes = review_conf.get("include", [])
     excludes = review_conf.get("exclude", [])
-    
+
     pathspec = []
     if includes:
         pathspec.extend(includes)
     if excludes:
         for ex in excludes:
             pathspec.append(f"':!{ex}'")
-            
     paths_arg = " ".join(pathspec)
-    diff_strategy = f"git diff {base_branch}...{state['target_commit']}"
+
+    diff_cmd = f"git diff {base_ref}..{state['target_commit']}"
     if paths_arg:
-        diff_strategy += f" -- {paths_arg}"
-        
-    diff_text, err, code = run_cmd(diff_strategy, cwd=cwd)
-    return diff_text, merge_base, ""
+        diff_cmd += f" -- {paths_arg}"
+
+    diff_text, _, _ = run_cmd(diff_cmd, cwd=cwd)
+    return diff_text, base_ref, ""
 
 
 def extract_changed_files(diff_text):
@@ -245,8 +263,15 @@ def main():
     if not agent.acquire_lock():
         sys.exit(0)
 
+    state = {}
     try:
         config = agent.config
+
+        cwd = agent.project_context['path']
+        if not os.path.isdir(cwd):
+            print(f"Error: project path does not exist: {cwd}", file=sys.stderr)
+            sys.exit(1)
+
         state = agent.load_state()
         if state.get("status_p1_review") in ["success", "skipped", "failed"]:
             return
@@ -254,8 +279,6 @@ def main():
         state["status_p1_review"] = "running"
         state["review_started_at"] = now_iso()
         agent.save_state(state)
-
-        cwd = agent.project_context['path']
         
         # 1. Preflight Commands (Build, Test, Lint)
         detailed_test_results = collect_command_results(agent, cwd)
@@ -444,6 +467,9 @@ def main():
             f.write(render_report())
 
         agent.save_state(state)
+
+        if llm_parse_ok:
+            save_last_reviewed(agent.project_name, state["target_commit"], state.get("review_finished_at"))
 
     except Exception as e:
         state["analysis_finished_at"] = state.get("analysis_finished_at") or now_iso()

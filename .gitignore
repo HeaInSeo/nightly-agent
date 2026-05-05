@@ -6,4 +6,6 @@ __pycache__/
 config.json
 .nightly_agent/runs/
 .nightly_agent/sandbox_worktree/
+.nightly_agent/last_reviewed/
+.nightly_agent/issues_db/
 venv/

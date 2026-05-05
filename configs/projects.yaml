@@ -16,7 +16,7 @@ projects:
   - name: tori
     path: /opt/go/src/github.com/HeaInSeo/tori
     github_url: https://github.com/HeaInSeo/tori
-    base_branch: main
+    base_branch: HEAD~3
     review:
       include:
         - "*.go"
@@ -33,7 +33,7 @@ projects:
   - name: DagEdit
     path: /opt/dotnet/src/github.com/HeaInSeo/DagEdit
     github_url: https://github.com/HeaInSeo/DagEdit
-    base_branch: main
+    base_branch: HEAD~3
     review:
       include:
         - "*.cs"
