@@ -3,6 +3,7 @@ projects:
     path: /opt/go/src/github.com/HeaInSeo/dag-go
     github_url: https://github.com/HeaInSeo/dag-go
     base_branch: HEAD~3
+    remote_first: true
     review:
       include:
         - "*.go"
@@ -17,6 +18,7 @@ projects:
     path: /opt/go/src/github.com/HeaInSeo/tori
     github_url: https://github.com/HeaInSeo/tori
     base_branch: HEAD~3
+    remote_first: true
     review:
       include:
         - "*.go"
@@ -34,6 +36,7 @@ projects:
     path: /opt/dotnet/src/github.com/HeaInSeo/DagEdit
     github_url: https://github.com/HeaInSeo/DagEdit
     base_branch: HEAD~3
+    remote_first: true
     review:
       include:
         - "*.cs"
@@ -51,6 +54,7 @@ projects:
     path: /opt/go/src/github.com/HeaInSeo/infra-lab
     github_url: https://github.com/HeaInSeo/infra-lab
     base_branch: HEAD~3
+    remote_first: true
     review:
       include:
         - "*.hcl"

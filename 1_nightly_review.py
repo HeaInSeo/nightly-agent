@@ -234,6 +234,49 @@ def resolve_review_level(agent, config):
     return min(level, max_level)
 
 
+def sync_remote(cwd, project_name, remote_first=False):
+    """git fetch origin 후 target_commit을 결정한다.
+
+    remote_first=True : origin/{branch} HEAD 반환 (비파괴적, 로컬 미수정)
+    remote_first=False: 로컬 HEAD 반환, 원격이 앞서면 경고만 출력
+
+    반환: (target_commit: str, is_stale: bool)
+    """
+    local_head, _, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
+    local_head = local_head.strip()
+
+    _, err, code = run_git(["fetch", "origin"], cwd=cwd)
+    if code != 0:
+        print(f"[{project_name}] Warning: git fetch 실패: {err}")
+        return local_head, False
+
+    branch, _, _ = run_git(["branch", "--show-current"], cwd=cwd)
+    branch = branch.strip()
+    if not branch:
+        print(f"[{project_name}] Warning: detached HEAD 상태, 원격 브랜치 확인 불가")
+        return local_head, False
+
+    remote_head, _, rcode = run_git(["rev-parse", f"origin/{branch}"], cwd=cwd)
+    if rcode != 0:
+        print(f"[{project_name}] Warning: origin/{branch} 없음")
+        return local_head, False
+
+    remote_head = remote_head.strip()
+    is_stale = remote_head != local_head
+
+    if remote_first:
+        if is_stale:
+            print(f"[{project_name}] remote_first: 원격 HEAD {remote_head[:8]} 기준 리뷰 (로컬은 {local_head[:8]})")
+        return remote_head, is_stale
+    else:
+        if is_stale:
+            print(
+                f"[{project_name}] Warning: 로컬이 origin/{branch}보다 뒤처져 있습니다. "
+                f"remote_first: true 설정 시 원격 변경사항을 리뷰할 수 있습니다."
+            )
+        return local_head, False
+
+
 def review_level_profile(level):
     if level <= 1:
         return {
@@ -272,9 +315,21 @@ def main():
             print(f"Error: project path does not exist: {cwd}", file=sys.stderr)
             sys.exit(1)
 
+        # 원격 동기화: 프로젝트 설정 > 글로벌 설정 > 기본값(False) 순으로 적용
+        remote_first = agent.project_context.get(
+            "remote_first", config.get("remote_first", False)
+        )
+        target_commit, is_stale = sync_remote(cwd, agent.project_name, remote_first=remote_first)
+
         state = agent.load_state()
         if state.get("status_p1_review") in ["success", "skipped", "failed"]:
             return
+
+        # remote_first=True이고 원격이 앞서 있으면 target_commit을 원격 HEAD로 교체
+        if is_stale:
+            state["local_commit"] = state["target_commit"]
+            state["target_commit"] = target_commit
+            state["local_stale"] = True
 
         state["status_p1_review"] = "running"
         state["review_started_at"] = now_iso()
