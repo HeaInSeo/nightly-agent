@@ -47,10 +47,10 @@ projects:
       test: "dotnet test"
       build: "dotnet build"
 
-  - name: multipass-k8s-lab
-    path: /opt/go/src/github.com/HeaInSeo/multipass-k8s-lab
-    github_url: https://github.com/HeaInSeo/multipass-k8s-lab
-    base_branch: main
+  - name: infra-lab
+    path: /opt/go/src/github.com/HeaInSeo/infra-lab
+    github_url: https://github.com/HeaInSeo/infra-lab
+    base_branch: HEAD~3
     review:
       include:
         - "*.hcl"
@@ -60,4 +60,4 @@ projects:
         - "*.sh"
     commands:
       validate: "terraform validate"
-      lint: "shellcheck scripts/*.sh"
+      lint: "shellcheck scripts/k8s-tool.sh"
