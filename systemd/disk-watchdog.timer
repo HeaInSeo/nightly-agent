@@ -1,0 +1,10 @@
+[Unit]
+Description=Disk Watchdog 타이머 — 매일 자정 실행
+Requires=disk-watchdog.service
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

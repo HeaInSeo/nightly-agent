@@ -1,0 +1,7 @@
+[Unit]
+Description=Disk Watchdog — 임계치 경보 및 /tmp 자동 정리
+
+[Service]
+Type=oneshot
+User=seoy
+ExecStart=/opt/python/src/github.com/HeaInSeo/nightly-agent/disk-watchdog.sh
