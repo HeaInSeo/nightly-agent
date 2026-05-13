@@ -6,6 +6,9 @@ import glob
 from jinja2 import Environment, FileSystemLoader
 from agent_core import AgentState, run_cmd, run_git, parse_args, ask_llm, now_iso, elapsed_seconds, load_last_reviewed, save_last_reviewed
 
+SOURCE_EXTENSIONS = {'.go', '.py', '.cs', '.ts', '.js', '.rs', '.sh'}
+EXCLUDE_DIRS = {'.git', 'vendor', 'node_modules', 'venv', '__pycache__', '.nightly_agent', 'dist', 'build', '.build', 'obj', 'bin'}
+
 
 def collect_command_results(agent, cwd):
     """빌드/테스트/린트/검증 결과를 한 번만 실행해 리포트용으로 정리한다."""
@@ -142,6 +145,43 @@ def build_review_context(diff_text, cwd):
             blocks.append(f"[File] {rel_path}\n{fallback}")
 
     return "\n\n".join(blocks[:3])
+
+
+def get_full_code_content(agent, cwd):
+    review_conf = agent.project_context.get("review", {})
+    includes = review_conf.get("include", [])
+    excludes = review_conf.get("exclude", [])
+
+    files_to_read = []
+    if includes:
+        for pattern in includes:
+            matched = glob.glob(os.path.join(cwd, pattern), recursive=True)
+            files_to_read.extend(f for f in matched if os.path.isfile(f))
+    else:
+        for root, dirs, files in os.walk(cwd):
+            dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
+            for fname in files:
+                if os.path.splitext(fname)[1] in SOURCE_EXTENSIONS:
+                    files_to_read.append(os.path.join(root, fname))
+
+    excluded = set()
+    for ex in excludes:
+        for matched in glob.glob(os.path.join(cwd, ex), recursive=True):
+            excluded.add(os.path.abspath(matched))
+
+    blocks = []
+    for fpath in sorted(set(files_to_read)):
+        if os.path.abspath(fpath) in excluded:
+            continue
+        rel = os.path.relpath(fpath, cwd)
+        try:
+            with open(fpath, 'r', errors='replace') as f:
+                content = f.read()
+            if content.strip():
+                blocks.append(f"=== {rel} ===\n{content}")
+        except Exception:
+            continue
+    return "\n\n".join(blocks)
 
 
 def issue_looks_false_positive(issue, cwd):
@@ -454,6 +494,70 @@ def main():
             if not issue_looks_false_positive(issue, cwd)
         ]
 
+        # 전체 코드 리뷰: 증분 이슈가 없을 때 자동 실행
+        full_code_review_triggered = False
+        full_review_issues = []
+        full_review_summary = ""
+
+        if (llm_parse_ok and
+                not ai_data.get("top_issues") and
+                state.get("diff_base_mode") == "last_reviewed" and
+                config.get("full_review_on_clean", True)):
+            code_content = get_full_code_content(agent, cwd)
+            if code_content.strip():
+                full_code_review_triggered = True
+                state["full_review_started_at"] = now_iso()
+                agent.save_state(state)
+                full_prompt_template = env.get_template("prompts/review/fullcode.md.j2")
+                full_rendered = full_prompt_template.render(
+                    heuristics=agent.heuristics,
+                    code_content=code_content,
+                )
+                full_json_directive = (
+                    "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
+                    '{"one_line_summary":"","top_issues":[{'
+                    '"title":"",'
+                    '"severity":"high|medium|low",'
+                    '"target_files":[""],'
+                    '"what_is_wrong":"",'
+                    '"suggested_action":"",'
+                    '"anchor":{"file":"","function":""}'
+                    '}]}'
+                    "\nReturn raw JSON only on a single line."
+                    "\nDo not use markdown fences."
+                    f"\nReturn at most {level_profile['max_issues']} top_issues."
+                    f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
+                    "\nKeep each string field concise: 1 short sentence."
+                    "\nOmit fields that are not listed in the schema."
+                    "\nIf there is no meaningful issue, return an empty top_issues array."
+                )
+                if lang == "ko":
+                    full_json_directive += "\nALL text inside the JSON values MUST be written in Korean."
+                else:
+                    full_json_directive += "\nALL text inside the JSON values MUST be written in English."
+                full_ai_res = ask_llm(
+                    full_rendered + full_json_directive,
+                    config,
+                    max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
+                    response_format={"type": "json_object"},
+                )
+                state["full_review_finished_at"] = now_iso()
+                state["full_review_duration_sec"] = elapsed_seconds(
+                    state.get("full_review_started_at"), state.get("full_review_finished_at")
+                )
+                try:
+                    full_ai_data = json.loads(full_ai_res.replace("```json", "").replace("```", "").strip())
+                    full_review_issues = [
+                        iss for iss in full_ai_data.get("top_issues", [])
+                        if not issue_looks_false_positive(iss, cwd)
+                    ]
+                    full_review_summary = full_ai_data.get("one_line_summary", "")
+                except Exception:
+                    pass
+                state["full_code_review"] = True
+                state["full_review_issues_count"] = len(full_review_issues)
+                agent.save_state(state)
+
         state["report_started_at"] = now_iso()
         agent.save_state(state)
 
@@ -482,7 +586,13 @@ def main():
                 top_issues=ai_data.get("top_issues", []),
                 categorize=ai_data.get("categorize", {}),
                 test_results=detailed_test_results,
-                llm_review=ai_data.get("llm_review", {})
+                llm_review=ai_data.get("llm_review", {}),
+                full_code_review_triggered=full_code_review_triggered,
+                full_review_issues=full_review_issues,
+                full_review_summary=full_review_summary,
+                full_review_started_at=state.get("full_review_started_at"),
+                full_review_finished_at=state.get("full_review_finished_at"),
+                full_review_duration_sec=state.get("full_review_duration_sec"),
             )
 
         report_template = env.get_template(f"templates/{lang}/report.md.j2")
@@ -496,6 +606,10 @@ def main():
         run_issues = []
         for iss in ai_data.get("top_issues", []):
             run_issues.append(make_issue_record(iss, agent.run_id, state["target_commit"]))
+        for iss in full_review_issues:
+            rec = make_issue_record(iss, agent.run_id, state["target_commit"])
+            rec["full_code_review"] = True
+            run_issues.append(rec)
 
         issues_path = os.path.join(agent.get_run_dir(), "issues.json")
         with open(issues_path, "w") as f:

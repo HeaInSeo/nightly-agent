@@ -63,3 +63,19 @@
 
 ### 성능 / 동시성 문제 위험도
 {{ llm_review.get('performance', '') }}
+
+{% if full_code_review_triggered %}
+## 6. 전체 코드 리뷰 (증분 이슈 없음 → 자동 실행)
+- **전체 리뷰 소요**: {{ full_review_started_at or '-' }} → {{ full_review_finished_at or '-' }} ({{ full_review_duration_sec if full_review_duration_sec is not none else '-' }}초)
+
+**한줄 평가**: {{ full_review_summary or '-' }}
+
+{% if full_review_issues %}
+{% for issue in full_review_issues %}
+{{ loop.index }}. **{{ issue.title }}** ({{ issue.severity }}) (`{{ issue.target_files | join(', ') }}`)
+   - 조치 권고: {{ issue.suggested_action }}
+{% endfor %}
+{% else %}
+- 전체 코드 리뷰에서도 이슈가 발견되지 않았습니다.
+{% endif %}
+{% endif %}
