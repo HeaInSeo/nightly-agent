@@ -461,6 +461,7 @@ def main():
         state["status_p2_fix"] = "failed"
         state["error_message"] = str(e)
         agent.save_state(state)
+        sys.exit(1)
     finally:
         cleanup_worktree(worktree_path, branch_name, project_cwd)
         agent.release_lock()

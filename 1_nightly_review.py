@@ -170,6 +170,7 @@ def get_full_code_content(agent, cwd):
             excluded.add(os.path.abspath(matched))
 
     blocks = []
+    files_included = []
     for fpath in sorted(set(files_to_read)):
         if os.path.abspath(fpath) in excluded:
             continue
@@ -179,9 +180,93 @@ def get_full_code_content(agent, cwd):
                 content = f.read()
             if content.strip():
                 blocks.append(f"=== {rel} ===\n{content}")
+                files_included.append(rel)
         except Exception:
             continue
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), files_included
+
+
+def run_full_code_review(agent, state, config, cwd, env, lang, level_profile):
+    """전체 소스 파일 기반 LLM 리뷰. diff 없음 또는 diff 리뷰 clean 시 호출."""
+    code_content, reviewed_files = get_full_code_content(agent, cwd)
+    if not code_content.strip():
+        return {"triggered": False, "issues": [], "summary": "", "parse_ok": False, "files": [], "truncated": False}
+
+    state["full_review_started_at"] = now_iso()
+    agent.save_state(state)
+
+    full_prompt_template = env.get_template("prompts/review/fullcode.md.j2")
+    full_rendered = full_prompt_template.render(
+        heuristics=agent.heuristics,
+        code_content=code_content,
+    )
+    full_json_directive = (
+        "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
+        '{"one_line_summary":"","top_issues":[{'
+        '"title":"",'
+        '"severity":"high|medium|low",'
+        '"target_files":[""],'
+        '"what_is_wrong":"",'
+        '"suggested_action":"",'
+        '"anchor":{"file":"","function":""}'
+        '}]}'
+        "\nReturn raw JSON only on a single line."
+        "\nDo not use markdown fences."
+        f"\nReturn at most {level_profile['max_issues']} top_issues."
+        f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
+        "\nKeep each string field concise: 1 short sentence."
+        "\nOmit fields that are not listed in the schema."
+        "\nIf there is no meaningful issue, return an empty top_issues array."
+    )
+    if lang == "ko":
+        full_json_directive += "\nALL text inside the JSON values MUST be written in Korean."
+    else:
+        full_json_directive += "\nALL text inside the JSON values MUST be written in English."
+
+    full_ai_res = ask_llm(
+        full_rendered + full_json_directive,
+        config,
+        max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
+        response_format={"type": "json_object"},
+    )
+
+    state["full_review_finished_at"] = now_iso()
+    state["full_review_duration_sec"] = elapsed_seconds(
+        state.get("full_review_started_at"), state.get("full_review_finished_at")
+    )
+
+    parse_ok = False
+    issues = []
+    summary = ""
+    raw_snippet = ""
+    try:
+        full_ai_data = json.loads(full_ai_res.replace("```json", "").replace("```", "").strip())
+        parse_ok = True
+        issues = [
+            iss for iss in full_ai_data.get("top_issues", [])
+            if not issue_looks_false_positive(iss, cwd)
+        ]
+        summary = full_ai_data.get("one_line_summary", "")
+    except Exception:
+        raw_snippet = full_ai_res[:300] if full_ai_res else ""
+
+    state["full_code_review"] = True
+    state["full_review_parse_ok"] = parse_ok
+    state["full_review_issues_count"] = len(issues)
+    state["full_review_files"] = reviewed_files
+    state["full_review_truncated"] = False
+    if raw_snippet:
+        state["full_review_raw_snippet"] = raw_snippet
+    agent.save_state(state)
+
+    return {
+        "triggered": True,
+        "issues": issues,
+        "summary": summary,
+        "parse_ok": parse_ok,
+        "files": reviewed_files,
+        "truncated": False,
+    }
 
 
 def issue_looks_false_positive(issue, cwd):
@@ -374,20 +459,98 @@ def main():
         state["status_p1_review"] = "running"
         state["review_started_at"] = now_iso()
         agent.save_state(state)
-        
+
+        # 공통 설정 — diff/full 양쪽 경로에서 모두 필요
+        lang = config.get("language", "ko")
+        env = Environment(loader=FileSystemLoader('.'))
+        review_level = resolve_review_level(agent, config)
+        level_profile = review_level_profile(review_level)
+        state["review_level"] = review_level
+
         # 1. Preflight Commands (Build, Test, Lint)
         detailed_test_results = collect_command_results(agent, cwd)
 
         # 2. Diff extraction
         diff_text, merge_base, err_msg = get_filtered_diff(agent, state, cwd)
         if err_msg or not diff_text.strip():
-            state["review_finished_at"] = now_iso()
-            state["review_duration_sec"] = elapsed_seconds(
-                state.get("review_started_at"), state.get("review_finished_at")
+            can_full_review = (
+                not err_msg and
+                state.get("diff_base_mode") == "last_reviewed" and
+                config.get("full_review_on_clean", True)
             )
-            state["status_p1_review"] = "skipped"
-            state["error_message"] = err_msg or "No diff found."
-            agent.save_state(state)
+            if can_full_review:
+                full_result = run_full_code_review(agent, state, config, cwd, env, lang, level_profile)
+                if full_result["triggered"]:
+                    from agent_core import make_issue_record
+                    run_issues = []
+                    for iss in full_result["issues"]:
+                        rec = make_issue_record(iss, agent.run_id, state["target_commit"])
+                        rec["full_code_review"] = True
+                        run_issues.append(rec)
+                    issues_path = os.path.join(agent.get_run_dir(), "issues.json")
+                    with open(issues_path, "w") as f:
+                        json.dump(run_issues, f, indent=4, ensure_ascii=False)
+                    state["issues_file"] = issues_path
+                    report_template = env.get_template(f"templates/{lang}/report.md.j2")
+                    report_path = os.path.join(agent.get_run_dir(), "review_report.md")
+                    with open(report_path, "w") as f:
+                        f.write(report_template.render(
+                            project_name=agent.project_name,
+                            current_date=state["created_at"],
+                            target_branch=state["target_branch"],
+                            target_commit=state["target_commit"],
+                            merge_base=merge_base,
+                            changed_files_count=0,
+                            diff_lines_count=0,
+                            status_review="Done" if full_result["parse_ok"] else "Degraded",
+                            status_fix="Pending",
+                            review_level=review_level,
+                            review_started_at=state.get("review_started_at"),
+                            review_finished_at=state.get("full_review_finished_at"),
+                            review_duration_sec=state.get("full_review_duration_sec"),
+                            analysis_started_at=state.get("full_review_started_at"),
+                            analysis_finished_at=state.get("full_review_finished_at"),
+                            analysis_duration_sec=state.get("full_review_duration_sec"),
+                            report_started_at=state.get("full_review_finished_at"),
+                            report_finished_at=state.get("full_review_finished_at"),
+                            report_duration_sec=0,
+                            one_line_summary="",
+                            top_issues=[],
+                            categorize={},
+                            test_results=detailed_test_results,
+                            llm_review={},
+                            full_code_review_triggered=True,
+                            full_review_issues=full_result["issues"],
+                            full_review_summary=full_result["summary"],
+                            full_review_started_at=state.get("full_review_started_at"),
+                            full_review_finished_at=state.get("full_review_finished_at"),
+                            full_review_duration_sec=state.get("full_review_duration_sec"),
+                        ))
+                    state["review_report_path"] = report_path
+                    state["status_p1_review"] = "full_review_only"
+                    state["review_finished_at"] = state.get("full_review_finished_at") or now_iso()
+                    state["review_duration_sec"] = elapsed_seconds(
+                        state.get("review_started_at"), state.get("review_finished_at")
+                    )
+                    agent.save_state(state)
+                    if full_result["parse_ok"]:
+                        save_last_reviewed(agent.project_name, state["target_commit"], state.get("review_finished_at"))
+                else:
+                    state["status_p1_review"] = "skipped"
+                    state["error_message"] = "No diff and no source files for full review."
+                    state["review_finished_at"] = now_iso()
+                    state["review_duration_sec"] = elapsed_seconds(
+                        state.get("review_started_at"), state.get("review_finished_at")
+                    )
+                    agent.save_state(state)
+            else:
+                state["status_p1_review"] = "skipped"
+                state["error_message"] = err_msg or "No diff found."
+                state["review_finished_at"] = now_iso()
+                state["review_duration_sec"] = elapsed_seconds(
+                    state.get("review_started_at"), state.get("review_finished_at")
+                )
+                agent.save_state(state)
             return
 
         diff_lines = len(diff_text.splitlines())
@@ -403,11 +566,6 @@ def main():
 
         state["merge_base"] = merge_base
         state["base_branch"] = agent.project_context.get('base_branch')
-        review_level = resolve_review_level(agent, config)
-        level_profile = review_level_profile(review_level)
-        state["review_level"] = review_level
-        
-        env = Environment(loader=FileSystemLoader('.'))
 
         # 3. Dynamic Prompting via Jinja — 첫 번째 매칭 타입 프롬프트 사용
         prompt_path = "prompts/review/generic.md.j2"
@@ -424,8 +582,6 @@ def main():
             review_context=review_context,
             review_level=review_level,
         )
-        
-        lang = config.get("language", "ko")
         
         # 8B급 로컬 모델에서도 안정적으로 닫힌 JSON을 반환하도록
         # 리뷰 스키마를 최소 필드만 남긴다.
@@ -498,65 +654,17 @@ def main():
         full_code_review_triggered = False
         full_review_issues = []
         full_review_summary = ""
+        full_review_parse_ok = False
 
         if (llm_parse_ok and
                 not ai_data.get("top_issues") and
                 state.get("diff_base_mode") == "last_reviewed" and
                 config.get("full_review_on_clean", True)):
-            code_content = get_full_code_content(agent, cwd)
-            if code_content.strip():
-                full_code_review_triggered = True
-                state["full_review_started_at"] = now_iso()
-                agent.save_state(state)
-                full_prompt_template = env.get_template("prompts/review/fullcode.md.j2")
-                full_rendered = full_prompt_template.render(
-                    heuristics=agent.heuristics,
-                    code_content=code_content,
-                )
-                full_json_directive = (
-                    "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
-                    '{"one_line_summary":"","top_issues":[{'
-                    '"title":"",'
-                    '"severity":"high|medium|low",'
-                    '"target_files":[""],'
-                    '"what_is_wrong":"",'
-                    '"suggested_action":"",'
-                    '"anchor":{"file":"","function":""}'
-                    '}]}'
-                    "\nReturn raw JSON only on a single line."
-                    "\nDo not use markdown fences."
-                    f"\nReturn at most {level_profile['max_issues']} top_issues."
-                    f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
-                    "\nKeep each string field concise: 1 short sentence."
-                    "\nOmit fields that are not listed in the schema."
-                    "\nIf there is no meaningful issue, return an empty top_issues array."
-                )
-                if lang == "ko":
-                    full_json_directive += "\nALL text inside the JSON values MUST be written in Korean."
-                else:
-                    full_json_directive += "\nALL text inside the JSON values MUST be written in English."
-                full_ai_res = ask_llm(
-                    full_rendered + full_json_directive,
-                    config,
-                    max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
-                    response_format={"type": "json_object"},
-                )
-                state["full_review_finished_at"] = now_iso()
-                state["full_review_duration_sec"] = elapsed_seconds(
-                    state.get("full_review_started_at"), state.get("full_review_finished_at")
-                )
-                try:
-                    full_ai_data = json.loads(full_ai_res.replace("```json", "").replace("```", "").strip())
-                    full_review_issues = [
-                        iss for iss in full_ai_data.get("top_issues", [])
-                        if not issue_looks_false_positive(iss, cwd)
-                    ]
-                    full_review_summary = full_ai_data.get("one_line_summary", "")
-                except Exception:
-                    pass
-                state["full_code_review"] = True
-                state["full_review_issues_count"] = len(full_review_issues)
-                agent.save_state(state)
+            full_result = run_full_code_review(agent, state, config, cwd, env, lang, level_profile)
+            full_code_review_triggered = full_result["triggered"]
+            full_review_issues = full_result["issues"]
+            full_review_summary = full_result["summary"]
+            full_review_parse_ok = full_result["parse_ok"]
 
         state["report_started_at"] = now_iso()
         agent.save_state(state)
@@ -590,6 +698,7 @@ def main():
                 full_code_review_triggered=full_code_review_triggered,
                 full_review_issues=full_review_issues,
                 full_review_summary=full_review_summary,
+                full_review_parse_ok=full_review_parse_ok,
                 full_review_started_at=state.get("full_review_started_at"),
                 full_review_finished_at=state.get("full_review_finished_at"),
                 full_review_duration_sec=state.get("full_review_duration_sec"),
@@ -658,6 +767,7 @@ def main():
         state["status_p1_review"] = "failed"
         state["error_message"] = str(e)
         agent.save_state(state)
+        sys.exit(1)
     finally:
         agent.release_lock()
 

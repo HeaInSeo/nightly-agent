@@ -245,25 +245,34 @@ def merge_new_issues(project_name, run_issues):
 
 
 def reconcile_missing_issues(project_name, run_issues):
-    """이번 리뷰에서 재현되지 않은 open/recurring 이슈를 false_positive로 정리한다."""
+    """이번 리뷰에서 재확인되지 않은 이슈를 stale_candidate로 표시한다.
+    자동 false_positive 변환은 하지 않는다 — full code review로 해당 파일이
+    실제 검증된 경우에만 나중에 처리한다.
+    """
     db = dedupe_issues(load_issues_db(project_name))
     migrate_false_positive_statuses(db)
     current_keys = {canonical_issue_key(iss) for iss in run_issues}
     today = datetime.datetime.now().strftime("%Y-%m-%d")
 
-    false_positive_count = 0
+    stale_count = 0
     for iss in db:
         if iss.get("status") in ("resolved", "false_positive"):
             continue
         if canonical_issue_key(iss) in current_keys:
+            # 이번 리뷰에서 재확인됨 — stale 표시 초기화
+            iss.pop("stale_since", None)
+            iss.pop("stale_reason", None)
+            if iss.get("status") == "stale_candidate":
+                iss["status"] = "open"
             continue
-        iss["status"] = "false_positive"
-        iss["false_positive_date"] = today
-        iss["false_positive_reason"] = "Not reproduced in latest review after prompt/filter cleanup."
-        false_positive_count += 1
+        if iss.get("status") != "stale_candidate":
+            iss["status"] = "stale_candidate"
+            iss["stale_since"] = today
+            iss["stale_reason"] = "Not reproduced in latest review. Requires full code review validation before closing."
+            stale_count += 1
 
     save_issues_db(project_name, db)
-    return false_positive_count
+    return stale_count
 
 
 def main():

@@ -18,6 +18,8 @@
 ## {{ c.project_name }}
 {% if c.review_status == "skipped" %}
 > 변경 사항 없음 — 스킵되었습니다.
+{% elif c.review_status == "full_review_only" %}
+> diff 없음 — 전체 코드 리뷰 실행됨{% if c.full_code_review %} ✓{% endif %}
 {% elif c.review_status == "failed" %}
 > 리뷰 실패: {{ c.error_message }}
 {% else %}
@@ -30,9 +32,9 @@
 
 **한줄 평가**: {{ c.one_line_summary }}
 {% endif %}
-{% if c.false_positive_cleanup_count %}
+{% if c.stale_candidate_count %}
 
-**정리된 오탐 이슈**: {{ c.false_positive_cleanup_count }}개
+**미확인 이슈 (stale_candidate)**: {{ c.stale_candidate_count }}개
 {% endif %}
 
 ### 빌드 / 테스트 / 린트
