@@ -18,6 +18,8 @@
 ## {{ c.project_name }}
 {% if c.review_status == "skipped" %}
 > No changes found — skipped.
+{% elif c.review_status == "partial_large_diff_review" %}
+> ⚠️ **Large diff** — per-file split review used. Cross-file interaction bugs may not have been detected.
 {% elif c.review_status == "failed" %}
 > Review failed: {{ c.error_message }}
 {% else %}

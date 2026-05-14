@@ -26,6 +26,13 @@
       "3": "medium"
     }
   },
+  "full_review_on_clean": true,
+  "large_diff_review": {
+    "enabled": true,
+    "max_files": 30,
+    "max_lines_per_file": 500,
+    "cross_file_pass": true
+  },
   "language": "ko",
 
   "github": {

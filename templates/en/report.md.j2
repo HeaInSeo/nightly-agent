@@ -78,3 +78,26 @@
 - No issues found in full code review either.
 {% endif %}
 {% endif %}
+
+{% if large_diff_review_triggered | default(false) %}
+## 7. Large Diff Split Review
+
+> ⚠️ Diff was too large for a single review pass — per-file split review was used. Cross-file interaction bugs may not have been detected.
+
+- **Files reviewed**: {{ large_diff_file_summaries | length }} / {{ (large_diff_file_summaries | length) + (large_diff_omitted_files | length) }} total changed files
+{% if large_diff_omitted_files %}
+- **Files skipped** ({{ large_diff_omitted_files | length }}): {{ large_diff_omitted_files | join(', ') }}
+{% endif %}
+{% if large_diff_partially_reviewed %}
+- **Partially reviewed (truncated)**: {{ large_diff_partially_reviewed | join(', ') }}
+{% endif %}
+- **Cross-file interaction pass**: {% if large_diff_cross_file_pass %}ran{% else %}not run (no truncated files){% endif %}
+
+{% if large_diff_file_summaries %}
+### Per-file Summaries
+{% for fs in large_diff_file_summaries %}
+- `{{ fs.file }}`{% if fs.truncated %} ⚠️ truncated{% endif %}: {{ fs.summary or '-' }}
+  {% if fs.issues %}({{ fs.issues | length }} issue(s)){% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}

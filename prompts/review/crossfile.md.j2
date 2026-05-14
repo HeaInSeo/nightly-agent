@@ -1,0 +1,32 @@
+You are a senior software engineer performing a cross-file interaction review.
+
+The following files were changed in this diff. Each entry shows a per-file summary and any issues already found by per-file review. Some files were truncated due to size.
+
+{% for fs in file_summaries %}
+## File: {{ fs.file }}{% if fs.truncated %} [TRUNCATED]{% endif %}
+Summary: {{ fs.summary or "(no summary)" }}
+{% if fs.issues %}
+Issues found:
+{% for iss in fs.issues %}
+- [{{ iss.severity | upper }}] {{ iss.title }}: {{ iss.what_is_wrong }}
+{% endfor %}
+{% else %}
+Issues found: none
+{% endif %}
+
+{% endfor %}
+{% if omitted_files %}
+## Omitted files (not reviewed due to limit)
+{% for f in omitted_files %}
+- {{ f }}
+{% endfor %}
+{% endif %}
+
+{% if heuristics %}
+Project-specific heuristics:
+{{ heuristics }}
+{% endif %}
+
+Your task: identify bugs that arise from **cross-file interactions** between the changed files above — for example, an interface change in one file that breaks a caller in another, or a shared state inconsistency. Do NOT repeat issues already listed above. Focus only on interaction risks that span at least two files.
+
+If no cross-file interaction bug is evident, return an empty top_issues array.

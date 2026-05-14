@@ -9,6 +9,29 @@ from agent_core import AgentState, run_cmd, run_git, parse_args, ask_llm, now_is
 SOURCE_EXTENSIONS = {'.go', '.py', '.cs', '.ts', '.js', '.rs', '.sh'}
 EXCLUDE_DIRS = {'.git', 'vendor', 'node_modules', 'venv', '__pycache__', '.nightly_agent', 'dist', 'build', '.build', 'obj', 'bin'}
 
+SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+SKIP_PATTERNS = [
+    re.compile(r'\.pb\.go$'),
+    re.compile(r'_test\.go$'),
+    re.compile(r'(^|[\\/])vendor[\\/]'),
+    re.compile(r'(^|[\\/])node_modules[\\/]'),
+    re.compile(r'(^|[\\/])migrations?[\\/]'),
+    re.compile(r'\.(gen|generated|auto)\.(go|ts|cs)$'),
+    re.compile(r'^go\.sum$'),
+]
+
+HIGH_PRIORITY_PATTERNS = [
+    re.compile(r'(^|[\\/])main\.(go|py|cs|ts|js)$'),
+    re.compile(r'(^|[\\/])cmd[\\/]'),
+    re.compile(r'(^|[\\/])api[\\/]'),
+    re.compile(r'(^|[\\/])handler'),
+    re.compile(r'(^|[\\/])controller'),
+    re.compile(r'(^|[\\/])service[\\/]'),
+    re.compile(r'(^|[\\/])auth[\\/]'),
+    re.compile(r'(^|[\\/])security[\\/]'),
+]
+
 
 def collect_command_results(agent, cwd):
     """빌드/테스트/린트/검증 결과를 한 번만 실행해 리포트용으로 정리한다."""
@@ -402,6 +425,217 @@ def sync_remote(cwd, project_name, remote_first=False):
         return local_head, False
 
 
+def build_json_directive(level_profile, lang, max_issues=None):
+    n = max_issues if max_issues is not None else level_profile["max_issues"]
+    directive = (
+        "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
+        '{"one_line_summary":"","top_issues":[{'
+        '"title":"",'
+        '"severity":"high|medium|low",'
+        '"target_files":[""],'
+        '"what_is_wrong":"",'
+        '"suggested_action":"",'
+        '"anchor":{"file":"","function":""}'
+        '}]}'
+        "\nReturn raw JSON only on a single line."
+        "\nDo not use markdown fences."
+        f"\nReturn at most {n} top_issues."
+        f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
+        "\nKeep each string field concise: 1 short sentence."
+        "\nOmit fields that are not listed in the schema."
+        "\nIf there is no meaningful issue, return an empty top_issues array."
+    )
+    if level_profile.get("strict_mode"):
+        directive += (
+            "\nDo not report an issue when nearby comments or current code explicitly justify the behavior."
+            "\nTreat design-rationale comments as strong evidence unless the diff clearly breaks that contract."
+            "\nDo not invent concurrency bugs from heuristic suspicion alone."
+        )
+    else:
+        directive += (
+            "\nPrefer concrete bugs first, but you may include medium-confidence risks if they are technically grounded."
+        )
+    if lang == "ko":
+        directive += "\nALL text inside the JSON values MUST be written in Korean."
+    else:
+        directive += "\nALL text inside the JSON values MUST be written in English."
+    return directive
+
+
+def list_changed_files(base_ref, target_commit, cwd):
+    out, _, code = run_git(["diff", "--name-only", base_ref, target_commit], cwd=cwd)
+    if code != 0:
+        return []
+    return [f.strip() for f in out.splitlines() if f.strip()]
+
+
+def select_review_files(changed_files, config, max_files=30):
+    ldconf = config.get("large_diff_review", {})
+    limit = ldconf.get("max_files", max_files)
+    high, normal, low = [], [], []
+    for f in changed_files:
+        if any(p.search(f) for p in SKIP_PATTERNS):
+            low.append(f)
+        elif any(p.search(f) for p in HIGH_PRIORITY_PATTERNS):
+            high.append(f)
+        else:
+            normal.append(f)
+    ordered = high + normal + low
+    return ordered[:limit], ordered[limit:]
+
+
+def get_file_diff(base_ref, target_commit, path, cwd, max_lines=500):
+    out, _, code = run_git(["diff", base_ref, target_commit, "--", path], cwd=cwd)
+    if code != 0:
+        return "", False
+    lines = out.splitlines()
+    if len(lines) <= max_lines:
+        return out, False
+    return "\n".join(lines[:max_lines]), True
+
+
+def run_cross_file_summary_pass(agent, config, env, lang, level_profile, file_summaries, omitted_files):
+    """파일별 요약+이슈를 합산해 파일 간 상호작용 버그를 LLM으로 감지한다."""
+    cross_template = env.get_template("prompts/review/crossfile.md.j2")
+    rendered = cross_template.render(
+        file_summaries=file_summaries,
+        omitted_files=omitted_files,
+        heuristics=agent.heuristics,
+    )
+    directive = build_json_directive(level_profile, lang, max_issues=2)
+    ai_res = ask_llm(
+        rendered + directive,
+        config,
+        max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
+        response_format={"type": "json_object"},
+    )
+    try:
+        data = json.loads(ai_res.replace("```json", "").replace("```", "").strip())
+        cwd = agent.project_context.get("path", ".")
+        issues = [
+            iss for iss in data.get("top_issues", [])
+            if not issue_looks_false_positive(iss, cwd)
+        ]
+        return {"issues": issues, "summary": data.get("one_line_summary", ""), "parse_ok": True}
+    except Exception:
+        return {"issues": [], "summary": "", "parse_ok": False}
+
+
+def run_large_diff_review(agent, state, config, cwd, env, lang, level_profile, review_level, base_ref, target_commit):
+    """큰 diff를 파일별로 분할 리뷰한다. None 반환 시 state가 이미 'skipped'로 설정됨."""
+    ldconf = config.get("large_diff_review", {})
+    max_lines_per_file = ldconf.get("max_lines_per_file", 500)
+    cross_file_pass_enabled = ldconf.get("cross_file_pass", True)
+
+    changed_files = list_changed_files(base_ref, target_commit, cwd)
+    if not changed_files:
+        state["status_p1_review"] = "skipped"
+        state["error_message"] = "Large diff but no changed files detected."
+        return None
+
+    selected_files, omitted_files = select_review_files(changed_files, config)
+
+    prompt_path = "prompts/review/generic.md.j2"
+    for pt in getattr(agent, 'project_types', []):
+        candidate = f"prompts/review/{pt}.md.j2"
+        if os.path.exists(candidate):
+            prompt_path = candidate
+            break
+    prompt_template = env.get_template(prompt_path)
+
+    state["analysis_started_at"] = now_iso()
+    agent.save_state(state)
+
+    review_truncated = False
+    partially_reviewed_files = []
+    all_issues = []
+    file_summaries = []
+
+    for fpath in selected_files:
+        file_diff, truncated = get_file_diff(base_ref, target_commit, fpath, cwd, max_lines_per_file)
+        if not file_diff.strip():
+            continue
+        if truncated:
+            review_truncated = True
+            partially_reviewed_files.append(fpath)
+
+        rendered = prompt_template.render(
+            heuristics=agent.heuristics,
+            diff_text=file_diff,
+            review_context="",
+            review_level=review_level,
+        )
+        directive = build_json_directive(level_profile, lang, max_issues=2)
+        ai_res = ask_llm(
+            rendered + directive,
+            config,
+            max_tokens=config.get("llm", {}).get("review_max_tokens", 1400),
+            response_format={"type": "json_object"},
+        )
+        try:
+            data = json.loads(ai_res.replace("```json", "").replace("```", "").strip())
+            file_issues = [
+                iss for iss in data.get("top_issues", [])
+                if not issue_looks_false_positive(iss, cwd)
+            ]
+            file_summary = data.get("one_line_summary", "")
+        except Exception:
+            file_issues = []
+            file_summary = ""
+
+        all_issues.extend(file_issues)
+        file_summaries.append({
+            "file": fpath,
+            "summary": file_summary,
+            "issues": file_issues,
+            "truncated": truncated,
+        })
+
+    state["analysis_finished_at"] = now_iso()
+    state["analysis_duration_sec"] = elapsed_seconds(
+        state.get("analysis_started_at"), state.get("analysis_finished_at")
+    )
+
+    cross_issues = []
+    if review_truncated and cross_file_pass_enabled and file_summaries:
+        cross_result = run_cross_file_summary_pass(
+            agent, config, env, lang, level_profile, file_summaries, omitted_files
+        )
+        cross_issues = cross_result["issues"]
+        all_issues.extend(cross_issues)
+
+    seen_titles = set()
+    deduped = []
+    for iss in all_issues:
+        t = iss.get("title", "")
+        if t not in seen_titles:
+            seen_titles.add(t)
+            deduped.append(iss)
+    deduped.sort(key=lambda x: SEVERITY_ORDER.get(x.get("severity", "low"), 2))
+
+    one_line_summary = next(
+        (fs["summary"] for fs in file_summaries if fs.get("summary")), ""
+    )
+
+    state["large_diff_files_reviewed"] = len(file_summaries)
+    state["large_diff_files_omitted"] = len(omitted_files)
+    state["large_diff_review_truncated"] = review_truncated
+    state["large_diff_partially_reviewed"] = partially_reviewed_files
+    state["large_diff_cross_file_pass"] = bool(cross_issues)
+    state["one_line_summary"] = one_line_summary
+    agent.save_state(state)
+
+    return {
+        "issues": deduped,
+        "file_summaries": file_summaries,
+        "review_truncated": review_truncated,
+        "partially_reviewed_files": partially_reviewed_files,
+        "omitted_files": omitted_files,
+        "cross_issues": cross_issues,
+        "one_line_summary": one_line_summary,
+    }
+
+
 def review_level_profile(level):
     if level <= 1:
         return {
@@ -555,13 +789,103 @@ def main():
 
         diff_lines = len(diff_text.splitlines())
         if diff_lines > config.get("max_diff_lines", 2000):
-            state["review_finished_at"] = now_iso()
+            ldconf = config.get("large_diff_review", {})
+            if not ldconf.get("enabled", True):
+                state["review_finished_at"] = now_iso()
+                state["review_duration_sec"] = elapsed_seconds(
+                    state.get("review_started_at"), state.get("review_finished_at")
+                )
+                state["status_p1_review"] = "skipped"
+                state["error_message"] = "Diff too large limit exceeded."
+                agent.save_state(state)
+                return
+
+            large_result = run_large_diff_review(
+                agent, state, config, cwd, env, lang, level_profile, review_level,
+                merge_base, state["target_commit"]
+            )
+            if large_result is None:
+                state["review_finished_at"] = now_iso()
+                state["review_duration_sec"] = elapsed_seconds(
+                    state.get("review_started_at"), state.get("review_finished_at")
+                )
+                agent.save_state(state)
+                return
+
+            from agent_core import make_issue_record
+            run_issues = []
+            for iss in large_result["issues"]:
+                rec = make_issue_record(iss, agent.run_id, state["target_commit"])
+                rec["large_diff_review"] = True
+                run_issues.append(rec)
+            issues_path = os.path.join(agent.get_run_dir(), "issues.json")
+            with open(issues_path, "w") as f:
+                json.dump(run_issues, f, indent=4, ensure_ascii=False)
+            state["issues_file"] = issues_path
+
+            state["report_started_at"] = now_iso()
+            agent.save_state(state)
+
+            report_template_ld = env.get_template(f"templates/{lang}/report.md.j2")
+            report_path = os.path.join(agent.get_run_dir(), "review_report.md")
+            with open(report_path, "w") as f:
+                f.write(report_template_ld.render(
+                    project_name=agent.project_name,
+                    current_date=state["created_at"],
+                    target_branch=state["target_branch"],
+                    target_commit=state["target_commit"],
+                    merge_base=merge_base,
+                    changed_files_count=len(large_result["file_summaries"]),
+                    diff_lines_count=diff_lines,
+                    status_review="PartialReview",
+                    status_fix="Pending",
+                    review_level=review_level,
+                    review_started_at=state.get("review_started_at"),
+                    review_finished_at=state.get("review_finished_at"),
+                    review_duration_sec=state.get("review_duration_sec"),
+                    analysis_started_at=state.get("analysis_started_at"),
+                    analysis_finished_at=state.get("analysis_finished_at"),
+                    analysis_duration_sec=state.get("analysis_duration_sec"),
+                    report_started_at=state.get("report_started_at"),
+                    report_finished_at=state.get("report_finished_at"),
+                    report_duration_sec=state.get("report_duration_sec"),
+                    one_line_summary=large_result["one_line_summary"],
+                    top_issues=large_result["issues"],
+                    categorize={},
+                    test_results=detailed_test_results,
+                    llm_review={},
+                    full_code_review_triggered=False,
+                    full_review_issues=[],
+                    full_review_summary="",
+                    full_review_parse_ok=False,
+                    full_review_started_at=None,
+                    full_review_finished_at=None,
+                    full_review_duration_sec=None,
+                    large_diff_review_triggered=True,
+                    large_diff_file_summaries=large_result["file_summaries"],
+                    large_diff_omitted_files=large_result["omitted_files"],
+                    large_diff_partially_reviewed=large_result["partially_reviewed_files"],
+                    large_diff_cross_file_pass=bool(large_result["cross_issues"]),
+                    large_diff_review_truncated=large_result["review_truncated"],
+                ))
+
+            state["review_report_path"] = report_path
+            state["test_results"] = detailed_test_results
+            state["report_finished_at"] = now_iso()
+            state["report_duration_sec"] = elapsed_seconds(
+                state.get("report_started_at"), state.get("report_finished_at")
+            )
+            state["review_finished_at"] = state["report_finished_at"]
             state["review_duration_sec"] = elapsed_seconds(
                 state.get("review_started_at"), state.get("review_finished_at")
             )
-            state["status_p1_review"] = "skipped"
-            state["error_message"] = "Diff too large limit exceeded."
+            state["status_p1_review"] = "partial_large_diff_review"
             agent.save_state(state)
+
+            if not large_result["review_truncated"]:
+                save_last_reviewed(
+                    agent.project_name, state["target_commit"], state.get("review_finished_at")
+                )
             return
 
         state["merge_base"] = merge_base
@@ -583,42 +907,7 @@ def main():
             review_level=review_level,
         )
         
-        # 8B급 로컬 모델에서도 안정적으로 닫힌 JSON을 반환하도록
-        # 리뷰 스키마를 최소 필드만 남긴다.
-        json_directive = (
-            "\n\nOutput ONLY valid JSON mapped to this exact struct:\n"
-            '{"one_line_summary":"","top_issues":[{'
-            '"title":"",'
-            '"severity":"high|medium|low",'
-            '"target_files":[""],'
-            '"what_is_wrong":"",'
-            '"suggested_action":"",'
-            '"anchor":{"file":"","function":""}'
-            '}]}'
-        )
-        json_directive += (
-            "\nReturn raw JSON only on a single line."
-            "\nDo not use markdown fences."
-            f"\nReturn at most {level_profile['max_issues']} top_issues."
-            f"\nKeep one_line_summary under {level_profile['summary_chars']} characters."
-            "\nKeep each string field concise: 1 short sentence."
-            "\nOmit fields that are not listed in the schema."
-            "\nIf there is no meaningful issue, return an empty top_issues array."
-        )
-        if level_profile["strict_mode"]:
-            json_directive += (
-                "\nDo not report an issue when nearby comments or current code explicitly justify the behavior."
-                "\nTreat design-rationale comments as strong evidence unless the diff clearly breaks that contract."
-                "\nDo not invent concurrency bugs from heuristic suspicion alone."
-            )
-        else:
-            json_directive += (
-                "\nPrefer concrete bugs first, but you may include medium-confidence risks if they are technically grounded."
-            )
-        if lang == "ko":
-            json_directive += "\nALL text inside the JSON values MUST be written in Korean."
-        else:
-            json_directive += "\nALL text inside the JSON values MUST be written in English."
+        json_directive = build_json_directive(level_profile, lang)
 
         state["analysis_started_at"] = now_iso()
         agent.save_state(state)
@@ -702,6 +991,12 @@ def main():
                 full_review_started_at=state.get("full_review_started_at"),
                 full_review_finished_at=state.get("full_review_finished_at"),
                 full_review_duration_sec=state.get("full_review_duration_sec"),
+                large_diff_review_triggered=False,
+                large_diff_file_summaries=[],
+                large_diff_omitted_files=[],
+                large_diff_partially_reviewed=[],
+                large_diff_cross_file_pass=False,
+                large_diff_review_truncated=False,
             )
 
         report_template = env.get_template(f"templates/{lang}/report.md.j2")
