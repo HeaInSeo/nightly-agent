@@ -176,11 +176,23 @@ def main():
                 state_file = os.path.join(".nightly_agent", "runs", run_id, pname, "state.json")
                 with open(issues_file) as _f:
                     run_issues = _json.load(_f)
-                added = continuity_mod.merge_new_issues(pname, run_issues)
-                stale_marked = continuity_mod.reconcile_missing_issues(pname, run_issues)
+
+                # can_reconcile gate: partial/truncated 리뷰에서는 stale reconcile 금지
+                st = {}
                 if os.path.exists(state_file):
                     with open(state_file, "r") as sf:
                         st = _json.load(sf)
+                can_reconcile = st.get("can_reconcile", True)
+
+                added = continuity_mod.merge_new_issues(pname, run_issues)
+                if can_reconcile:
+                    stale_marked = continuity_mod.reconcile_missing_issues(pname, run_issues)
+                else:
+                    stale_marked = 0
+                    reason = st.get("last_reviewed_skip_reason", "부분 리뷰")
+                    print(f"[{pname}] reconcile 생략: {reason}")
+
+                if st and os.path.exists(state_file):
                     st["stale_candidate_count"] = stale_marked
                     with open(state_file, "w") as sf:
                         _json.dump(st, sf, indent=4)

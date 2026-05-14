@@ -92,7 +92,10 @@
 {% if large_diff_partially_reviewed %}
 - **부분 리뷰 (잘림)**: {{ large_diff_partially_reviewed | join(', ') }}
 {% endif %}
-- **파일 간 상호작용 패스**: {% if large_diff_cross_file_pass %}실행됨{% else %}미실행 (잘린 파일 없음){% endif %}
+- **파일 간 상호작용 패스**: {% if large_diff_cross_file_pass %}실행됨{% else %}미실행{% endif %}
+{% if large_diff_review_truncated or large_diff_omitted_files %}
+- ⚠️ **last_reviewed_commit 미갱신**: {% if large_diff_review_truncated %}{{ large_diff_partially_reviewed | length }}개 파일 잘림{% endif %}{% if large_diff_review_truncated and large_diff_omitted_files %}, {% endif %}{% if large_diff_omitted_files %}{{ large_diff_omitted_files | length }}개 파일 미검토{% endif %} → reconcile 및 커밋 기록 업데이트 생략 (다음 실행에서 전체 diff 기준으로 재시작)
+{% endif %}
 
 {% if large_diff_file_summaries %}
 ### 파일별 요약

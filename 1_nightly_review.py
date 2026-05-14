@@ -11,14 +11,25 @@ EXCLUDE_DIRS = {'.git', 'vendor', 'node_modules', 'venv', '__pycache__', '.night
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
+# 리뷰 우선순위에서 맨 뒤로 보내는 파일들 (자동생성·의존성 잠금 파일)
 SKIP_PATTERNS = [
-    re.compile(r'\.pb\.go$'),
-    re.compile(r'_test\.go$'),
+    re.compile(r'\.pb\.go$'),                        # proto 생성 Go
+    re.compile(r'\.(gen|generated|auto)\.(go|ts|cs)$'),
+    re.compile(r'^go\.sum$'),                         # 의존성 잠금
     re.compile(r'(^|[\\/])vendor[\\/]'),
     re.compile(r'(^|[\\/])node_modules[\\/]'),
-    re.compile(r'(^|[\\/])migrations?[\\/]'),
-    re.compile(r'\.(gen|generated|auto)\.(go|ts|cs)$'),
-    re.compile(r'^go\.sum$'),
+]
+
+# 인터페이스/계약 변경 파일 — 파일 간 영향 범위가 넓어 HIGH보다 먼저 리뷰
+CONTRACT_SENSITIVE_PATTERNS = [
+    re.compile(r'\.proto$'),
+    re.compile(r'^go\.mod$'),
+    re.compile(r'(^|[\\/])migrations?[\\/]'),         # DB 스키마 변경
+    re.compile(r'openapi\.(yaml|yml|json)$'),
+    re.compile(r'swagger\.(yaml|yml|json)$'),
+    re.compile(r'(^|[\\/])crd[\\/]'),                 # k8s CRD
+    re.compile(r'(^|[\\/])rbac[\\/]'),
+    re.compile(r'_schema\.(go|ts|json)$'),
 ]
 
 HIGH_PRIORITY_PATTERNS = [
@@ -31,6 +42,8 @@ HIGH_PRIORITY_PATTERNS = [
     re.compile(r'(^|[\\/])auth[\\/]'),
     re.compile(r'(^|[\\/])security[\\/]'),
 ]
+
+_TEST_GO_RE = re.compile(r'_test\.go$')
 
 
 def collect_command_results(agent, cwd):
@@ -472,15 +485,25 @@ def list_changed_files(base_ref, target_commit, cwd):
 def select_review_files(changed_files, config, max_files=30):
     ldconf = config.get("large_diff_review", {})
     limit = ldconf.get("max_files", max_files)
-    high, normal, low = [], [], []
+
+    # test-only diff: _test.go를 skip-last로 보내지 않고 normal로 처리
+    all_test_only = bool(changed_files) and all(_TEST_GO_RE.search(f) for f in changed_files)
+
+    contract, high, normal, low = [], [], [], []
     for f in changed_files:
-        if any(p.search(f) for p in SKIP_PATTERNS):
+        if _TEST_GO_RE.search(f) and not all_test_only:
             low.append(f)
+        elif any(p.search(f) for p in SKIP_PATTERNS):
+            low.append(f)
+        elif any(p.search(f) for p in CONTRACT_SENSITIVE_PATTERNS):
+            contract.append(f)
         elif any(p.search(f) for p in HIGH_PRIORITY_PATTERNS):
             high.append(f)
         else:
             normal.append(f)
-    ordered = high + normal + low
+
+    # 우선순위: contract > high > normal > low(skip-last)
+    ordered = contract + high + normal + low
     return ordered[:limit], ordered[limit:]
 
 
@@ -596,20 +619,34 @@ def run_large_diff_review(agent, state, config, cwd, env, lang, level_profile, r
         state.get("analysis_started_at"), state.get("analysis_finished_at")
     )
 
+    # cross-file pass: truncated/omitted/multi-file/contract-sensitive 조건 중 하나라도 해당되면 실행
+    has_contract_sensitive = any(
+        any(p.search(fs["file"]) for p in CONTRACT_SENSITIVE_PATTERNS)
+        for fs in file_summaries
+    )
+    should_cross_file = (
+        review_truncated
+        or bool(omitted_files)
+        or len(file_summaries) >= 2
+        or has_contract_sensitive
+    )
     cross_issues = []
-    if review_truncated and cross_file_pass_enabled and file_summaries:
+    if should_cross_file and cross_file_pass_enabled and file_summaries:
         cross_result = run_cross_file_summary_pass(
             agent, config, env, lang, level_profile, file_summaries, omitted_files
         )
         cross_issues = cross_result["issues"]
         all_issues.extend(cross_issues)
 
-    seen_titles = set()
+    # dedup: (정규화된 title[:60], 첫 번째 target_file) 복합 키 — title만으론 너무 공격적
+    seen_keys = set()
     deduped = []
     for iss in all_issues:
-        t = iss.get("title", "")
-        if t not in seen_titles:
-            seen_titles.add(t)
+        title_norm = iss.get("title", "").lower().strip()[:60]
+        file0 = (iss.get("target_files") or [""])[0]
+        key = (title_norm, file0)
+        if key not in seen_keys:
+            seen_keys.add(key)
             deduped.append(iss)
     deduped.sort(key=lambda x: SEVERITY_ORDER.get(x.get("severity", "low"), 2))
 
@@ -617,12 +654,24 @@ def run_large_diff_review(agent, state, config, cwd, env, lang, level_profile, r
         (fs["summary"] for fs in file_summaries if fs.get("summary")), ""
     )
 
+    # can_reconcile: truncated 또는 omitted 파일이 있으면 stale reconcile 금지
+    can_reconcile = not review_truncated and not bool(omitted_files)
+    skip_reasons = []
+    if review_truncated:
+        skip_reasons.append(f"{len(partially_reviewed_files)}개 파일 잘림")
+    if omitted_files:
+        skip_reasons.append(f"{len(omitted_files)}개 파일 미검토")
+    last_reviewed_skip_reason = ", ".join(skip_reasons) if skip_reasons else None
+
     state["large_diff_files_reviewed"] = len(file_summaries)
     state["large_diff_files_omitted"] = len(omitted_files)
     state["large_diff_review_truncated"] = review_truncated
     state["large_diff_partially_reviewed"] = partially_reviewed_files
     state["large_diff_cross_file_pass"] = bool(cross_issues)
     state["one_line_summary"] = one_line_summary
+    state["can_reconcile"] = can_reconcile
+    if last_reviewed_skip_reason:
+        state["last_reviewed_skip_reason"] = last_reviewed_skip_reason
     agent.save_state(state)
 
     return {
@@ -633,6 +682,8 @@ def run_large_diff_review(agent, state, config, cwd, env, lang, level_profile, r
         "omitted_files": omitted_files,
         "cross_issues": cross_issues,
         "one_line_summary": one_line_summary,
+        "can_reconcile": can_reconcile,
+        "last_reviewed_skip_reason": last_reviewed_skip_reason,
     }
 
 
@@ -882,9 +933,15 @@ def main():
             state["status_p1_review"] = "partial_large_diff_review"
             agent.save_state(state)
 
-            if not large_result["review_truncated"]:
+            if large_result["can_reconcile"]:
                 save_last_reviewed(
                     agent.project_name, state["target_commit"], state.get("review_finished_at")
+                )
+            else:
+                reason = large_result.get("last_reviewed_skip_reason", "부분 리뷰")
+                print(
+                    f"[{agent.project_name}] last_reviewed_commit 미갱신 ({reason}) "
+                    f"— 다음 실행에서 reconcile 생략"
                 )
             return
 

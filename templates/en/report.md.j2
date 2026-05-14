@@ -91,7 +91,10 @@
 {% if large_diff_partially_reviewed %}
 - **Partially reviewed (truncated)**: {{ large_diff_partially_reviewed | join(', ') }}
 {% endif %}
-- **Cross-file interaction pass**: {% if large_diff_cross_file_pass %}ran{% else %}not run (no truncated files){% endif %}
+- **Cross-file interaction pass**: {% if large_diff_cross_file_pass %}ran{% else %}not run{% endif %}
+{% if large_diff_review_truncated or large_diff_omitted_files %}
+- ⚠️ **last_reviewed_commit not saved**: {% if large_diff_review_truncated %}{{ large_diff_partially_reviewed | length }} file(s) truncated{% endif %}{% if large_diff_review_truncated and large_diff_omitted_files %}, {% endif %}{% if large_diff_omitted_files %}{{ large_diff_omitted_files | length }} file(s) not reviewed{% endif %} → reconcile and commit tracking skipped (next run restarts from full diff baseline)
+{% endif %}
 
 {% if large_diff_file_summaries %}
 ### Per-file Summaries
