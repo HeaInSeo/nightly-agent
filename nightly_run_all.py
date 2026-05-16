@@ -14,11 +14,19 @@ def parse_args():
     parser.add_argument("--run-id", help="run_id 직접 지정", required=False)
     return parser.parse_args()
 
-def run_phase(script, extra_args):
+def run_phase(script, extra_args, timeout_sec=None):
     """단계 스크립트를 list argv 방식으로 실행하고 종료 코드를 반환한다.
-    출력은 캡처하지 않고 터미널/cron 로그로 흘려보낸다."""
-    result = subprocess.run([sys.executable, script] + extra_args)
-    return result.returncode
+    출력은 캡처하지 않고 터미널/cron 로그로 흘려보낸다.
+    timeout_sec 초과 시 자식 프로세스를 kill하고 -1을 반환한다."""
+    try:
+        result = subprocess.run(
+            [sys.executable, script] + extra_args,
+            timeout=timeout_sec,
+        )
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print(f"WARNING: {script} timed out after {timeout_sec}s")
+        return -2  # 타임아웃 전용 코드
 
 
 def load_continuity_module():
@@ -105,6 +113,10 @@ def main():
     ollama_url = llm_conf.get("api_base_url", "http://localhost:11434/v1")
     model_name = llm_conf.get("model_name", "?")
 
+    # 프로젝트당 Phase 1/2 타임아웃 (초). 설정 없으면 Phase1=5400(90분), Phase2=1800(30분)
+    phase1_timeout = config.get("phase1_timeout_sec", 5400)
+    phase2_timeout = config.get("phase2_timeout_sec", 1800)
+
     deadline_hour = parse_hour(config.get("deadline_hour"))
     deadline_minute = config.get("deadline_minute", 0)
     deadline_str = (
@@ -162,7 +174,23 @@ def main():
             continue
 
         print(f"[{pname}] Running Phase 1 (Review)...")
-        rc1 = run_phase("1_nightly_review.py", ["--project", pname, "--run-id", run_id])
+        rc1 = run_phase("1_nightly_review.py", ["--project", pname, "--run-id", run_id],
+                        timeout_sec=phase1_timeout)
+        if rc1 == -2:
+            # 타임아웃: state를 timed_out으로 업데이트하고 다음 프로젝트로
+            print(f"[{pname}] Phase 1 타임아웃 ({phase1_timeout}s). 다음 프로젝트로 스킵.")
+            import json as _json
+            state_file = os.path.join(".nightly_agent", "runs", run_id, pname, "state.json")
+            if os.path.exists(state_file):
+                with open(state_file, "r") as sf:
+                    st = _json.load(sf)
+                if st.get("status_p1_review") == "running":
+                    st["status_p1_review"] = "timed_out"
+                    st["error_message"] = f"Phase 1 타임아웃 ({phase1_timeout}s 초과)"
+                    with open(state_file, "w") as sf:
+                        _json.dump(st, sf, indent=4)
+            failed_projects.append((pname, "phase1", rc1))
+            continue
         if rc1 != 0:
             print(f"[{pname}] Phase 1 exited with code {rc1}.")
             failed_projects.append((pname, "phase1", rc1))
@@ -202,7 +230,8 @@ def main():
                 )
 
         print(f"[{pname}] Running Phase 2 (Fix)...")
-        rc2 = run_phase("2_nightly_fix_candidate.py", ["--project", pname, "--run-id", run_id])
+        rc2 = run_phase("2_nightly_fix_candidate.py", ["--project", pname, "--run-id", run_id],
+                        timeout_sec=phase2_timeout)
         if rc2 != 0:
             print(f"[{pname}] Phase 2 exited with code {rc2}.")
             failed_projects.append((pname, "phase2", rc2))

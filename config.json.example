@@ -29,10 +29,12 @@
   "full_review_on_clean": true,
   "large_diff_review": {
     "enabled": true,
-    "max_files": 30,
-    "max_lines_per_file": 500,
+    "max_files": 10,
+    "max_lines_per_file": 300,
     "cross_file_pass": true
   },
+  "phase1_timeout_sec": 5400,
+  "phase2_timeout_sec": 1800,
   "language": "ko",
 
   "github": {
